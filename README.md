@@ -25,7 +25,8 @@ Scopus API キーは Elsevier Developer Portal で取得します。
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install --upgrade pip
+pip install "git+https://github.com/huidsp/scopus-tools.git"
 ```
 
 ## 環境変数
