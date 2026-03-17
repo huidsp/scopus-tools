@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scopus_tools"
+version = "0.1.0"
+dependencies = [
+    "requests",
+    "pandas",
+    "python-dotenv",
+    "openai",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+scopus-tools = "scopus_tools.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
