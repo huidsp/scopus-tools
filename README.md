@@ -1,6 +1,6 @@
 # scopus_tools
 
-Scopus API を使って研究者情報と論文情報を取得し、集計・要約・AI 分析を行う Python ツールです。旧 `old/` 配下のスクリプトを CLI とモジュールに整理した構成で、著者検索、年次集計、要約表示、バッチ処理、専門分野推定を提供します。
+Scopus API を使って研究者情報と論文情報を取得し、集計・要約・AI 分析を行う Python ツールです。著者検索、年次集計、要約表示、バッチ処理、専門分野推定を提供します。
 
 ## 機能
 
@@ -26,12 +26,6 @@ Scopus API キーは Elsevier Developer Portal で取得します。
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-```
-
-開発用依存関係も含める場合:
-
-```bash
-pip install -e ".[dev]"
 ```
 
 ## 環境変数
@@ -91,8 +85,7 @@ scopus-tools stats --year "[2020,2024]" --input author_ids.csv --output stats.cs
 
 - `Name`
 - `Scopus ID`
-- `Affiliation`:
-任意ですが、そのまま出力に引き継がれます。
+- `Affiliation`（任意。ある場合はそのまま出力に引き継がれます）
 
 出力 CSV には次のような列が含まれます。
 
@@ -177,21 +170,5 @@ scopus_tools/
 	cli.py
 	core.py
 	utils.py
-old/
-	get_author.py
-	get_data.py
-	scopus_summary.py
-	scopus_batch_summary.py
-tests/
-	test_scopus_tools.py
-	test_legacy_compat.py
 pyproject.toml
 ```
-
-## テスト
-
-```bash
-.venv/bin/pytest tests/ -v
-```
-
-既存のテストには、基本機能のユニットテストに加えて、旧 `old/` スクリプトとの互換性を確認するダミーデータテストも含まれます。

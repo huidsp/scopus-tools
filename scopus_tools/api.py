@@ -91,6 +91,16 @@ class ScopusClient:
             data = response.json().get("search-results", {})
             total = int(data.get("opensearch:totalResults", 0))
             entries = data.get("entry", [])
+            total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+            current_page = (start // page_size) + 1 if total_pages > 0 else 0
+            fetched_records = min(start + len(entries), total) if total > 0 else 0
+            logger.info(
+                "Scopus取得進捗: %d/%d ページ (%d/%d 件)",
+                current_page,
+                total_pages,
+                fetched_records,
+                total,
+            )
             logger.debug("Retrieved %d entries (total=%d)", len(entries), total)
 
             for e in entries:
