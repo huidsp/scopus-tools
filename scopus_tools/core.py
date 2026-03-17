@@ -23,6 +23,18 @@ def compute_indices(citations):
             
     return h, g
 
+def resolve_year_range(year_range=None, recent_years=5, current_year=None):
+    """集計対象の年範囲を正規化する。未指定時は直近 recent_years 年を返す。"""
+    import datetime
+
+    current_year = current_year or datetime.datetime.now().year
+    if year_range is not None:
+        return year_range
+
+    recent_years = max(1, int(recent_years))
+    start_y = current_year - (recent_years - 1)
+    return start_y, current_year
+
 def summarize_papers(papers, recent_years=5, year_range=None):
     """論文リストから統計情報を抽出する"""
     import datetime
@@ -46,12 +58,8 @@ def summarize_papers(papers, recent_years=5, year_range=None):
     cites = [p["citations"] for p in papers]
     h, g = compute_indices(cites)
 
-    if year_range is not None:
-        start_y, end_y = year_range
-        recent_papers = [p for p in papers if start_y <= p["year"] <= end_y]
-    else:
-        recent_start = current_year - (recent_years - 1)
-        recent_papers = [p for p in papers if p["year"] >= recent_start]
+    start_y, end_y = resolve_year_range(year_range=year_range, recent_years=recent_years, current_year=current_year)
+    recent_papers = [p for p in papers if start_y <= p["year"] <= end_y]
 
     start_year = min(p["year"] for p in papers)
     research_years = current_year - start_year + 1

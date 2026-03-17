@@ -1,5 +1,6 @@
 import logging
 import pandas as pd
+from scopus_tools.core import resolve_year_range
 
 def setup_logging(level=logging.INFO):
     logging.basicConfig(
@@ -65,12 +66,11 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
     print(f"  総論文数          : {report['total_count']}")
     print(f"  総引用回数        : {report['total_citations']}")
     print(f"  筆頭著者論文数    : {report['total_first_author']}")
-    if year_range is not None:
-        recent_start, recent_end = year_range
-    else:
-        recent_years = max(1, int(recent_years))
-        recent_start = current_year - (recent_years - 1)
-        recent_end = current_year
+    recent_start, recent_end = resolve_year_range(
+        year_range=year_range,
+        recent_years=recent_years,
+        current_year=current_year,
+    )
     print(f"\n【指定した年の集計】（{recent_start}年〜{recent_end}年）")
     print(f"  論文数            : {report['recent_count']}")
     print(f"  総引用回数        : {report['recent_citations']}")
@@ -100,7 +100,7 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
             print(f"     EID       : {p['eid']}")
         print("")
 
-def process_batch_summary(input_path, output_path, client):
+def process_batch_summary(input_path, output_path, client, year_range=None):
     """CSV の Scopus ID 列を一括処理してサマリーCSVを出力する"""
     import csv
     from scopus_tools.core import summarize_papers
@@ -116,7 +116,7 @@ def process_batch_summary(input_path, output_path, client):
         s_ids = [s.strip() for s in str(scopus_id_value).split(",") if s.strip()]
         first, last = client.get_author_profile(s_ids[0])
         papers = client.search_papers(s_ids)
-        report = summarize_papers(papers)
+        report = summarize_papers(papers, year_range=year_range)
         if not report["has_data"]:
             logging.warning("No data found for %s", name)
             continue

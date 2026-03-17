@@ -287,3 +287,25 @@ class TestCli:
         summarize_mock.assert_called_once_with(DUMMY_PAPERS, year_range=(2021, 2025))
         print_mock.assert_called_once()
         assert print_mock.call_args.kwargs["year_range"] == (2021, 2025)
+
+    def test_batch_years_option(self):
+        from scopus_tools.cli import main
+
+        mock_client = MagicMock()
+
+        with patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+             patch("scopus_tools.utils.process_batch_summary") as batch_mock, \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", [
+                 "scopus-tools",
+                 "batch",
+                 "--input",
+                 "in.csv",
+                 "--output",
+                 "out.csv",
+                 "--years",
+                 "[2021,2025]",
+             ]):
+            main()
+
+        batch_mock.assert_called_once_with("in.csv", "out.csv", mock_client, year_range=(2021, 2025))

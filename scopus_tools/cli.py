@@ -1,5 +1,6 @@
 import argparse
 import logging
+import datetime
 from dotenv import load_dotenv
 from scopus_tools import api, core, ai_engine, utils
 
@@ -31,6 +32,7 @@ def main():
     batch_p = subparsers.add_parser("batch", help="Batch generate summary CSV for multiple authors")
     batch_p.add_argument("--input", required=True, help="Input CSV")
     batch_p.add_argument("--output", required=True, help="Output CSV path")
+    batch_p.add_argument("--years", default=None, help="Year range like [2021,2025]")
 
     # 5. analyze (追加機能: OpenAI連携)
     analyze_p = subparsers.add_parser("analyze", help="AI-based expertise estimation")
@@ -38,6 +40,22 @@ def main():
     analyze_p.add_argument("--lang", default="ja", help="Output language")
 
     args = parser.parse_args()
+
+    def parse_year_range(text, default_years=5):
+        if text is None:
+            current_year = datetime.datetime.now().year
+            start_y = current_year - (default_years - 1)
+            return (start_y, current_year)
+        try:
+            years_text = text.strip()
+            if not (years_text.startswith("[") and years_text.endswith("]")):
+                raise ValueError
+            start_y, end_y = [int(y.strip()) for y in years_text[1:-1].split(",")]
+            if start_y > end_y:
+                raise ValueError
+            return (start_y, end_y)
+        except ValueError:
+            parser.error("--years must be like [2021,2025] and start <= end")
 
     if args.command == "search":
         client = api.ScopusClient()
@@ -67,28 +85,14 @@ def main():
         s_ids = args.ids.split(",")
         papers = client.search_papers(s_ids)
         first, last = client.get_author_profile(s_ids[0])
-        year_range = None
-        if args.years:
-            try:
-                years_text = args.years.strip()
-                if not (years_text.startswith("[") and years_text.endswith("]")):
-                    raise ValueError
-                start_y, end_y = [int(y.strip()) for y in years_text[1:-1].split(",")]
-                if start_y > end_y:
-                    raise ValueError
-                year_range = (start_y, end_y)
-            except ValueError:
-                parser.error("--years must be like [2021,2025] and start <= end")
-
-        if year_range:
-            report = core.summarize_papers(papers, year_range=year_range)
-        else:
-            report = core.summarize_papers(papers)
+        year_range = parse_year_range(args.years)
+        report = core.summarize_papers(papers, year_range=year_range)
         utils.print_report_text(first, last, s_ids, report, papers, year_range=year_range)
 
     elif args.command == "batch":
         client = api.ScopusClient()
-        utils.process_batch_summary(args.input, args.output, client)
+        year_range = parse_year_range(args.years)
+        utils.process_batch_summary(args.input, args.output, client, year_range=year_range)
 
     elif args.command == "analyze":
         client = api.ScopusClient()
