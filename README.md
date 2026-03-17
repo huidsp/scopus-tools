@@ -96,10 +96,16 @@ scopus-tools stats --year "[2020,2024]" --input author_ids.csv --output stats.cs
 
 ### `summary`
 
-単一または複数の Scopus ID を対象に、研究歴、引用指標、最近 5 年の集計、被引用数上位 5 件を表示します。
+単一または複数の Scopus ID を対象に、研究歴、引用指標、指定した年の集計、被引用数上位 5 件を表示します。
 
 ```bash
 scopus-tools summary 12345678,87654321
+```
+
+年範囲を指定する例:
+
+```bash
+scopus-tools summary 12345678 --years "[2021,2025]"
 ```
 
 ### `batch`

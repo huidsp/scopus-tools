@@ -52,7 +52,7 @@ def process_author_csv(input_path, output_path, client):
             rows.append({"Name": name, "Scopus ID": "", "Affiliation": ""})
     save_output_csv(rows, output_path)
 
-def print_report_text(first, last, s_ids, report, papers):
+def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_range=None):
     """人間が読みやすい形式でサマリーを表示する（旧 print_summary と同等）"""
     import datetime
     current_year = datetime.datetime.now().year
@@ -65,8 +65,13 @@ def print_report_text(first, last, s_ids, report, papers):
     print(f"  総論文数          : {report['total_count']}")
     print(f"  総引用回数        : {report['total_citations']}")
     print(f"  筆頭著者論文数    : {report['total_first_author']}")
-    recent_start = current_year - 4
-    print(f"\n【最近5年間】（{recent_start}年〜{current_year}年）")
+    if year_range is not None:
+        recent_start, recent_end = year_range
+    else:
+        recent_years = max(1, int(recent_years))
+        recent_start = current_year - (recent_years - 1)
+        recent_end = current_year
+    print(f"\n【指定した年の集計】（{recent_start}年〜{recent_end}年）")
     print(f"  論文数            : {report['recent_count']}")
     print(f"  総引用回数        : {report['recent_citations']}")
     print(f"  筆頭著者論文数    : {report['recent_first_author']}")

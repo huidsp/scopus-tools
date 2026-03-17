@@ -257,3 +257,33 @@ class TestCli:
         captured = capsys.readouterr()
         assert "AI分析結果" in captured.out
         mock_client.search_papers.assert_called_once_with(["12345678", "87654321"])
+
+    def test_summary_years_option(self):
+        from scopus_tools.cli import main
+
+        mock_client = MagicMock()
+        mock_client.search_papers.return_value = DUMMY_PAPERS
+        mock_client.get_author_profile.return_value = ("Taro", "Tanaka")
+
+        with patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+             patch("scopus_tools.core.summarize_papers", return_value={
+                 "has_data": True,
+                 "total_count": 1,
+                 "total_citations": 1,
+                 "h_index": 1,
+                 "g_index": 1,
+                 "recent_count": 1,
+                 "recent_citations": 1,
+                 "total_first_author": 0,
+                 "recent_first_author": 0,
+                 "research_years": 1,
+                 "start_year": 2026,
+             }) as summarize_mock, \
+             patch("scopus_tools.utils.print_report_text") as print_mock, \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", ["scopus-tools", "summary", "12345678", "--years", "[2021,2025]"]):
+            main()
+
+        summarize_mock.assert_called_once_with(DUMMY_PAPERS, year_range=(2021, 2025))
+        print_mock.assert_called_once()
+        assert print_mock.call_args.kwargs["year_range"] == (2021, 2025)

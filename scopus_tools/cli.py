@@ -25,6 +25,7 @@ def main():
     # 3. summary (旧 scopus_summary.py)
     sum_p = subparsers.add_parser("summary", help="Show human-readable summary (H-index, Top 5 papers)")
     sum_p.add_argument("ids", help="Scopus IDs (comma separated)")
+    sum_p.add_argument("--years", default=None, help="Year range like [2021,2025]")
 
     # 4. batch (旧 scopus_batch_summary.py)
     batch_p = subparsers.add_parser("batch", help="Batch generate summary CSV for multiple authors")
@@ -66,8 +67,24 @@ def main():
         s_ids = args.ids.split(",")
         papers = client.search_papers(s_ids)
         first, last = client.get_author_profile(s_ids[0])
-        report = core.summarize_papers(papers)
-        utils.print_report_text(first, last, s_ids, report, papers)
+        year_range = None
+        if args.years:
+            try:
+                years_text = args.years.strip()
+                if not (years_text.startswith("[") and years_text.endswith("]")):
+                    raise ValueError
+                start_y, end_y = [int(y.strip()) for y in years_text[1:-1].split(",")]
+                if start_y > end_y:
+                    raise ValueError
+                year_range = (start_y, end_y)
+            except ValueError:
+                parser.error("--years must be like [2021,2025] and start <= end")
+
+        if year_range:
+            report = core.summarize_papers(papers, year_range=year_range)
+        else:
+            report = core.summarize_papers(papers)
+        utils.print_report_text(first, last, s_ids, report, papers, year_range=year_range)
 
     elif args.command == "batch":
         client = api.ScopusClient()
