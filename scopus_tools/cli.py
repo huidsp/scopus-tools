@@ -39,6 +39,12 @@ def main():
     analyze_p.add_argument("ids", help="Scopus IDs")
     analyze_p.add_argument("--lang", default="ja", help="Output language")
 
+    # 6. eval (業績に基づくAI総合評価)
+    eval_p = subparsers.add_parser("eval", help="AI-based comprehensive evaluation of research achievements")
+    eval_p.add_argument("ids", help="Scopus IDs (comma separated)")
+    eval_p.add_argument("--years", default=None, help="Year range like [2021,2025]")
+    eval_p.add_argument("--lang", default="ja", help="Output language (default: ja)")
+
     args = parser.parse_args()
 
     def parse_year_range(text, default_years=5):
@@ -98,6 +104,18 @@ def main():
         client = api.ScopusClient()
         papers = client.search_papers(args.ids.split(","))
         print(ai_engine.estimate_expertise(papers, lang=args.lang))
+
+    elif args.command == "eval":
+        client = api.ScopusClient()
+        s_ids = args.ids.split(",")
+        papers = client.search_papers(s_ids)
+        first, last = client.get_author_profile(s_ids[0])
+        year_range = parse_year_range(args.years)
+        report = core.summarize_papers(papers, year_range=year_range)
+        print(f"=== 業績評価: {first} {last} ({', '.join(s_ids)}) ===")
+        print(f"評価期間: {year_range[0]}〜{year_range[1]}")
+        print()
+        print(ai_engine.evaluate_achievements(papers, report, lang=args.lang))
 
 if __name__ == "__main__":
     main()
