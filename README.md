@@ -12,6 +12,7 @@ Scopus API・科研費 (KAKEN) データベース・LLM (OpenAI / Anthropic) を
 - [クイックスタート](#クイックスタート)
 - [必要要件](#必要要件)
 - [インストール](#インストール)
+- [Docker での利用](#docker-での利用)
 - [API キーの取得と設定](#api-キーの取得と設定)
   - [Scopus API キー (`SCOPUS_API_KEY`)](#scopus-api-キー-scopus_api_key)
   - [OpenAI API キー (`OPENAI_API_KEY`)](#openai-api-キー-openai_api_key)
@@ -99,6 +100,159 @@ pip install -e ".[ui,dev]"
 ```bash
 pip install "git+https://github.com/huidsp/scopus-tools.git"
 ```
+
+---
+
+## Docker での利用
+
+ローカルに Python 環境を作らず、Docker だけで CLI / WebUI を実行できます。
+リポジトリ直下に `Dockerfile` と `.dockerignore` が同梱され、GitHub Container Registry (GHCR)
+で公式イメージも配布しています(`linux/amd64` + `linux/arm64` マルチアーキ)。
+
+### GHCR から pull(通常はこちら)
+
+`git clone` も `docker build` も不要、`docker pull` だけで使えます:
+
+```bash
+# 最新リリース
+docker pull ghcr.io/huidsp/scopus-tools:latest
+
+# main 追随版(最新コミット)
+docker pull ghcr.io/huidsp/scopus-tools:main
+
+# バージョン固定
+docker pull ghcr.io/huidsp/scopus-tools:0.1.0
+docker pull ghcr.io/huidsp/scopus-tools:0.1     # マイナーまで固定
+```
+
+Apple Silicon Mac でも Linux サーバ (amd64) でも、`docker` 側が自動で正しい arch を選びます。
+
+以降の `docker run` の例では `scopus-tools` のかわりに `ghcr.io/huidsp/scopus-tools:latest`
+を指定すれば同様に動きます。
+
+### ローカルビルド(任意)
+
+ソースを改造して試したい場合や、オフライン環境で完結させたい場合:
+
+```bash
+git clone https://github.com/huidsp/scopus-tools.git
+cd scopus-tools
+docker build -t scopus-tools .
+```
+
+ベースイメージは `python:3.11-slim`。`gradio` を含む `[ui]` extras までインストール済みなので、
+そのまま WebUI も CLI も動きます。
+
+### WebUI を起動
+
+```bash
+docker run --rm -p 7860:7860 \
+  --env-file .env \
+  -v "$HOME/.scopus-tools/projects:/data/projects" \
+  ghcr.io/huidsp/scopus-tools:latest
+```
+
+- ブラウザで <http://localhost:7860> を開く(コンテナ内では `--inbrowser` は無効化されるので
+  自動オープンはしません)
+- `--env-file .env` で API キーをランタイム注入(イメージには焼き込まれません)
+- `-v` でプロジェクト JSON をホストに永続化(コンテナを消してもデータは残る)
+
+LAN 内の別 PC から触りたいときは `-p 0.0.0.0:7860:7860` でホスト側にも公開してください。
+
+### CLI を実行
+
+`ENTRYPOINT` が `scopus-tools` になっているので、`docker run` の引数がそのまま CLI 引数になります
+(以下、ローカルビルドした `scopus-tools` イメージのかわりに `ghcr.io/huidsp/scopus-tools:latest`
+を指定しても同じです):
+
+```bash
+IMG=ghcr.io/huidsp/scopus-tools:latest
+
+# 著者名から Scopus ID を検索
+docker run --rm --env-file .env "$IMG" search --name "Hiroyuki Okamura"
+
+# 業績サマリ
+docker run --rm --env-file .env "$IMG" summary 12345678 --years 2021-2025
+
+# AI 評価
+docker run --rm --env-file .env "$IMG" eval 12345678 --kaken-auto
+
+# CSV 入出力(ホスト側の作業ディレクトリをマウント)
+docker run --rm --env-file .env \
+  -v "$PWD:/work" -w /work \
+  "$IMG" batch --input authors.csv --output summary.csv
+```
+
+### docker compose で常駐させる
+
+毎回長い `docker run` を打ちたくない場合は、リポジトリ直下に以下の `docker-compose.yml` を置くと便利です:
+
+```yaml
+services:
+  scopus-tools:
+    image: ghcr.io/huidsp/scopus-tools:latest
+    # ローカルビルドしたい場合は image を消して下記を有効化:
+    # build: .
+    container_name: scopus-tools
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    volumes:
+      - ~/.scopus-tools/projects:/data/projects
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d            # WebUI をバックグラウンド起動
+docker compose logs -f          # ログ追従
+docker compose down             # 停止
+```
+
+### よく使うオプション早見表
+
+| 目的 | フラグ |
+|---|---|
+| API キーをコンテナに渡す | `--env-file .env` または `-e SCOPUS_API_KEY=...` |
+| プロジェクト JSON を永続化 | `-v "$HOME/.scopus-tools/projects:/data/projects"` |
+| CSV を読み書きしたい | `-v "$PWD:/work" -w /work` |
+| 別ポートで WebUI | `-p 8080:7860` |
+| LAN 公開 | `-p 0.0.0.0:7860:7860` |
+
+### 注意事項
+
+- **Scopus は機関 IP 認証**。Docker ホスト自体が機関ネットワーク(または機関 VPN 接続済み)で
+  ないと、コンテナからも認証が通りません。
+- `.env` は **イメージに焼き込まないでください**(`.dockerignore` で除外済)。漏れると鍵が
+  一緒に配布されます。配布用イメージを作るときも必ず `--env-file` で外から渡す運用に。
+- コンテナ内ユーザは UID 1000 (`appuser`)。ホストのプロジェクトディレクトリの所有者が違う場合は
+  `chown -R 1000:1000 ~/.scopus-tools/projects` するか、`docker run --user "$(id -u):$(id -g)"`
+  で揃えてください。
+
+### メンテナ向け: イメージ公開フロー
+
+`.github/workflows/docker-publish.yml` が以下のタイミングで自動ビルド & GHCR push します:
+
+| トリガー | publish されるタグ |
+|---|---|
+| `main` への push | `:main`, `:sha-<short>` |
+| `v*` タグの push (例: `v0.1.0`) | `:0.1.0`, `:0.1`, `:latest` |
+| Pull Request | (ビルドのみ、push なし) |
+
+リリースの出し方:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+# → GitHub Actions が走り、:0.1.0 / :0.1 / :latest が GHCR に publish される
+```
+
+**初回 push 直後にだけ必要な手作業**(2 回目以降は不要):
+
+1. https://github.com/users/huidsp/packages/container/scopus-tools/settings を開く
+2. **Danger Zone → Change package visibility → Public** に切替
+3. (任意)同ページ **Manage Actions access** に `huidsp/scopus-tools` リポジトリを追加し、
+   このリポジトリの Actions からのみ更新できる状態にする
 
 ---
 
