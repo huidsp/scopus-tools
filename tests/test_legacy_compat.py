@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -273,7 +274,8 @@ class TestLegacyCliCompatibility:
         mock_client = MagicMock()
         mock_client.get_papers_by_year.return_value = {"paper_count": 2, "total_citations": 9, "Article": 2}
 
-        with patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+        with patch.dict(os.environ, {"SCOPUS_API_KEY": "dummy"}), \
+             patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
              patch("scopus_tools.cli.load_dotenv"), \
              patch("scopus_tools.utils.read_input_csv", return_value=data_frame), \
              patch("scopus_tools.utils.save_output_csv") as save_mock, \

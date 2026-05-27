@@ -58,6 +58,20 @@ class TestComputeIndices:
         assert g == 0
 
 
+class TestDefaultEvalYearRange:
+    def test_previous_year_inclusive(self):
+        from scopus_tools.core import default_eval_year_range
+        # 2026 年中 → 前年(2025)を含む直近 5 年 = (2021, 2025)
+        assert default_eval_year_range(current_year=2026) == (2021, 2025)
+        # 2030 年中 → (2025, 2029)
+        assert default_eval_year_range(current_year=2030) == (2025, 2029)
+
+    def test_custom_window(self):
+        from scopus_tools.core import default_eval_year_range
+        # 3 年窓
+        assert default_eval_year_range(default_years=3, current_year=2026) == (2023, 2025)
+
+
 class TestSummarizePapers:
     def test_totals(self):
         from scopus_tools.core import summarize_papers
@@ -216,30 +230,56 @@ class TestSearchPapers:
 
 class TestEstimateExpertise:
     def test_returns_analysis(self):
+        from scopus_tools import llm
         from scopus_tools.ai_engine import estimate_expertise
 
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content="深層学習の専門家です。"))]
-        )
-        with patch("scopus_tools.ai_engine.OpenAI", return_value=mock_client), \
-             patch.dict(os.environ, {"OPENAI_API_KEY": "dummy"}):
+        default_key = llm.required_key_for(llm.DEFAULT_MODEL)
+        with patch.dict(os.environ, {default_key: "dummy"}, clear=True), \
+             patch("scopus_tools.llm.complete", return_value="深層学習の専門家です。") as mock_complete:
             result = estimate_expertise(DUMMY_PAPERS, lang="ja")
 
         assert "深層学習" in result
+        # 既定モデルで呼ばれる
+        assert mock_complete.call_args.args[0] == llm.DEFAULT_MODEL
 
     def test_no_api_key_returns_message(self):
+        from scopus_tools import llm
         from scopus_tools.ai_engine import estimate_expertise
 
+        default_key = llm.required_key_for(llm.DEFAULT_MODEL)
         with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop(default_key, None)
             result = estimate_expertise(DUMMY_PAPERS)
-        assert "OpenAI API key not found" in result
+        assert default_key in result and "Skipping" in result
+
+    def test_explicit_model_routes_to_matching_provider(self):
+        """OpenAI/Claude どちらの明示指定でも、その鍵だけ参照する。"""
+        from scopus_tools.ai_engine import estimate_expertise
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "dummy"}, clear=True), \
+             patch("scopus_tools.llm.complete", return_value="OpenAI") as mock_complete:
+            result = estimate_expertise(DUMMY_PAPERS, lang="ja", model="gpt-5.4")
+        assert "OpenAI" in result
+        assert mock_complete.call_args.args[0] == "gpt-5.4"
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "dummy"}, clear=True), \
+             patch("scopus_tools.llm.complete", return_value="Claude") as mock_complete:
+            result = estimate_expertise(DUMMY_PAPERS, lang="ja", model="claude-opus-4-7")
+        assert "Claude" in result
+        assert mock_complete.call_args.args[0] == "claude-opus-4-7"
 
 
 # ---------------------------------------------------------------------------
 # cli.py のテスト
 # ---------------------------------------------------------------------------
+
+_DUMMY_ENV = {
+    "SCOPUS_API_KEY": "dummy",
+    "OPENAI_API_KEY": "dummy",
+    "ANTHROPIC_API_KEY": "dummy",
+    "KAKEN_APP_ID": "dummy",
+}
+
 
 class TestCli:
     def test_analyze_command(self, capsys):
@@ -248,7 +288,8 @@ class TestCli:
         mock_client = MagicMock()
         mock_client.search_papers.return_value = DUMMY_PAPERS
 
-        with patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
              patch("scopus_tools.ai_engine.estimate_expertise", return_value="AI分析結果"), \
              patch("scopus_tools.cli.load_dotenv"), \
              patch("sys.argv", ["scopus-tools", "analyze", "12345678,87654321"]):
@@ -265,7 +306,8 @@ class TestCli:
         mock_client.search_papers.return_value = DUMMY_PAPERS
         mock_client.get_author_profile.return_value = ("Taro", "Tanaka")
 
-        with patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
              patch("scopus_tools.core.summarize_papers", return_value={
                  "has_data": True,
                  "total_count": 1,
@@ -293,7 +335,8 @@ class TestCli:
 
         mock_client = MagicMock()
 
-        with patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
              patch("scopus_tools.utils.process_batch_summary") as batch_mock, \
              patch("scopus_tools.cli.load_dotenv"), \
              patch("sys.argv", [
@@ -309,3 +352,200 @@ class TestCli:
             main()
 
         batch_mock.assert_called_once_with("in.csv", "out.csv", mock_client, year_range=(2021, 2025))
+
+    def test_missing_api_key_errors_before_running(self, capsys):
+        from scopus_tools.cli import main
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", ["scopus-tools", "summary", "12345678"]):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "SCOPUS_API_KEY" in captured.err
+
+    def test_batch_accepts_dashed_year_range(self):
+        from scopus_tools.cli import main
+
+        mock_client = MagicMock()
+
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+             patch("scopus_tools.utils.process_batch_summary") as batch_mock, \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", [
+                 "scopus-tools", "batch",
+                 "--input", "in.csv", "--output", "out.csv",
+                 "--years", "2021-2025",
+             ]):
+            main()
+
+        batch_mock.assert_called_once_with("in.csv", "out.csv", mock_client, year_range=(2021, 2025))
+
+    def test_webui_subcommand_accepts_projects_dir(self, capsys, tmp_path):
+        from scopus_tools.cli import main
+
+        captured_kwargs = {}
+
+        def fake_launch(**kwargs):
+            captured_kwargs.update(kwargs)
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("scopus_tools.webui.launch", side_effect=fake_launch), \
+             patch("sys.argv", [
+                 "scopus-tools", "webui",
+                 "--port", "9999",
+                 "--projects-dir", str(tmp_path / "projects"),
+             ]):
+            main()
+
+        assert captured_kwargs["projects_dir"] == str(tmp_path / "projects")
+        assert captured_kwargs["port"] == 9999
+        assert captured_kwargs["host"] == "127.0.0.1"
+
+    def test_search_rejects_mixed_modes(self, capsys):
+        from scopus_tools.cli import main
+
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", [
+                 "scopus-tools", "search",
+                 "--name", "Foo Bar",
+                 "--input", "in.csv", "--output", "out.csv",
+             ]):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "--name" in captured.err and "--input" in captured.err
+
+    def test_summary_json_format_emits_json(self, capsys):
+        import json
+        from scopus_tools.cli import main
+
+        mock_client = MagicMock()
+        mock_client.search_papers.return_value = DUMMY_PAPERS
+        mock_client.get_author_profile.return_value = ("Taro", "Tanaka")
+
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", [
+                 "scopus-tools", "summary", "12345678",
+                 "--years", "2021-2025", "--format", "json",
+             ]):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["scopus_ids"] == ["12345678"]
+        assert data["author"] == {"first": "Taro", "last": "Tanaka"}
+        assert data["year_range"] == [2021, 2025]
+        assert data["report"]["total_count"] == len(DUMMY_PAPERS)
+        assert len(data["papers"]) == len(DUMMY_PAPERS)
+
+    def test_summary_input_mode_iterates_csv_rows(self, tmp_path):
+        import pandas as pd
+        from scopus_tools.cli import main
+
+        csv_path = tmp_path / "in.csv"
+        pd.DataFrame([
+            {"Name": "A", "Scopus ID": "100"},
+            {"Name": "B", "Scopus ID": "200,201"},
+        ]).to_csv(csv_path, index=False)
+
+        mock_client = MagicMock()
+        mock_client.search_papers.return_value = DUMMY_PAPERS
+        mock_client.get_author_profile.return_value = ("Taro", "Tanaka")
+
+        out_path = tmp_path / "out.json"
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", [
+                 "scopus-tools", "summary",
+                 "--input", str(csv_path),
+                 "--format", "json",
+                 "--output", str(out_path),
+                 "--years", "2021-2025",
+             ]):
+            main()
+
+        import json
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert isinstance(data, list) and len(data) == 2
+        assert data[0]["scopus_ids"] == ["100"]
+        assert data[1]["scopus_ids"] == ["200", "201"]
+
+    def test_summary_rejects_missing_ids_and_input(self, capsys):
+        from scopus_tools.cli import main
+
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", ["scopus-tools", "summary"]):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "Scopus IDs" in captured.err or "--input" in captured.err
+
+    def test_eval_auto_links_kaken_by_name(self, capsys):
+        from scopus_tools.cli import main
+
+        scopus_mock = MagicMock()
+        scopus_mock.search_papers.return_value = DUMMY_PAPERS
+        scopus_mock.get_author_profile.return_value = ("Taro", "Tanaka")
+
+        kaken_mock = MagicMock()
+        kaken_mock.search_researcher_by_name.return_value = [
+            {"researcher_id": "80401243", "name": "田中 太郎", "affiliation": "Foo Univ"},
+        ]
+        kaken_mock.get_grants_by_researcher_id.return_value = [
+            {"title": "G1", "my_role": "principal_investigator"},
+        ]
+
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=scopus_mock), \
+             patch("scopus_tools.kaken.KakenClient", return_value=kaken_mock), \
+             patch("scopus_tools.ai_engine.evaluate_achievements", return_value="評価本文"), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", [
+                 "scopus-tools", "eval", "12345678",
+                 "--years", "2021-2025",
+             ]):
+            main()
+
+        kaken_mock.search_researcher_by_name.assert_called_once()
+        kaken_mock.get_grants_by_researcher_id.assert_called_once_with("80401243", lang="ja")
+        # evaluate_achievements should have been passed the grants list
+        from scopus_tools import ai_engine  # noqa: F401
+        captured = capsys.readouterr()
+        assert "KAKEN研究者番号: 80401243" in captured.out
+        assert "評価本文" in captured.out
+
+    def test_eval_no_kaken_skips_auto_link(self, capsys):
+        from scopus_tools.cli import main
+
+        scopus_mock = MagicMock()
+        scopus_mock.search_papers.return_value = DUMMY_PAPERS
+        scopus_mock.get_author_profile.return_value = ("Taro", "Tanaka")
+
+        kaken_mock = MagicMock()
+
+        with patch.dict(os.environ, _DUMMY_ENV), \
+             patch("scopus_tools.api.ScopusClient", return_value=scopus_mock), \
+             patch("scopus_tools.kaken.KakenClient", return_value=kaken_mock), \
+             patch("scopus_tools.ai_engine.evaluate_achievements", return_value="評価本文"), \
+             patch("scopus_tools.cli.load_dotenv"), \
+             patch("sys.argv", [
+                 "scopus-tools", "eval", "12345678",
+                 "--years", "2021-2025", "--no-kaken",
+             ]):
+            main()
+
+        kaken_mock.search_researcher_by_name.assert_not_called()
+        kaken_mock.get_grants_by_researcher_id.assert_not_called()
+        captured = capsys.readouterr()
+        assert "KAKEN研究者番号" not in captured.out

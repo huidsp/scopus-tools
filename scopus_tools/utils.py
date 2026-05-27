@@ -1,6 +1,22 @@
 import logging
+import sys
 import pandas as pd
 from scopus_tools.core import resolve_year_range
+
+# レポート表示の共通定数 / ヘルパー。
+# ラベル幅は各関数のローカル事情(日本語幅含む)があるため引数で指定する設計。
+SEP_WIDTH = 60
+
+
+def _hr(char="="):
+    """SEP_WIDTH 幅の区切り線文字列を返す。"""
+    return char * SEP_WIDTH
+
+
+def _section(label):
+    """『【XXX】』形式のセクション見出しを改行付きで返す。"""
+    return f"\n【{label}】"
+
 
 def setup_logging(level=logging.INFO):
     logging.basicConfig(
@@ -8,10 +24,31 @@ def setup_logging(level=logging.INFO):
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
 
-def read_input_csv(file_path):
-    """Name, Scopus ID, Affiliation を含むCSVを読み込む"""
+def read_input_csv(file_path, required_cols=None):
+    """CSVを読み込む。required_cols を指定すると不足列があれば ValueError を上げる。"""
     df = pd.read_csv(file_path)
+    if required_cols:
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"Input CSV '{file_path}' is missing required column(s): "
+                f"{', '.join(missing)}. Found columns: {', '.join(df.columns)}"
+            )
     return df
+
+
+def progress(msg):
+    """進捗 1 行を stderr に出力する(TTY なら同一行を上書き、非 TTY なら改行付き)。"""
+    if sys.stderr.isatty():
+        print(f"\r\033[K{msg}", end="", file=sys.stderr, flush=True)
+    else:
+        print(msg, file=sys.stderr, flush=True)
+
+
+def progress_done():
+    """TTY 上の進捗行を改行で確定させる。"""
+    if sys.stderr.isatty():
+        print("", file=sys.stderr, flush=True)
 
 def save_output_csv(data_list, file_path):
     """リスト形式のデータをCSVとして保存する"""
@@ -23,23 +60,25 @@ def print_author_results(name, results):
     if not results:
         print(f"No results found for: {name}")
         return
-    print(f"\n{'='*60}")
+    print(f"\n{_hr()}")
     print(f"Results for '{name}'")
-    print(f"{'='*60}")
+    print(_hr())
     print(f"\nFound {len(results)} unique author(s):\n")
     for r in results:
         print(f"  Scopus ID  : {r['id']}")
         print(f"  Name       : {r['name']}")
         print(f"  Affiliation: {r['affiliation']}")
         print(f"  Documents  : {r['doc_count']}")
-        print("-" * 60)
+        print(_hr("-"))
 
 def process_author_csv(input_path, output_path, client):
     """CSV の Name 列を一括検索して所属機関別に Scopus ID をまとめたCSVを出力する"""
-    df = read_input_csv(input_path)
+    df = read_input_csv(input_path, required_cols=["Name"])
+    total = len(df)
     rows = []
-    for _, row in df.iterrows():
-        name = str(row["Name"])
+    for idx, row in enumerate(df.itertuples(index=False), start=1):
+        name = str(getattr(row, "Name"))
+        progress(f"[{idx}/{total}] searching: {name}")
         found = client.search_author_by_name(name)
         # 所属機関別にIDをグループ化（旧 get_author.py の process_csv と同等）
         affiliation_dict = {}
@@ -51,18 +90,19 @@ def process_author_csv(input_path, output_path, client):
                 rows.append({"Name": name, "Scopus ID": ",".join(ids), "Affiliation": aff})
         else:
             rows.append({"Name": name, "Scopus ID": "", "Affiliation": ""})
+    progress_done()
     save_output_csv(rows, output_path)
 
 def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_range=None):
     """人間が読みやすい形式でサマリーを表示する（旧 print_summary と同等）"""
     import datetime
     current_year = datetime.datetime.now().year
-    print("=" * 60)
+    print(_hr())
     print(f"Scopus IDs: {', '.join(s_ids)}")
     print(f"Name      : {first} {last}".strip())
-    print("=" * 60)
+    print(_hr())
     print(f"研究歴: {report['start_year']}年〜{current_year}年（{report['research_years']}年間）")
-    print("\n【全期間】")
+    print(_section("全期間"))
     print(f"  総論文数          : {report['total_count']}")
     print(f"  総引用回数        : {report['total_citations']}")
     print(f"  筆頭著者論文数    : {report['total_first_author']}")
@@ -71,15 +111,15 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
         recent_years=recent_years,
         current_year=current_year,
     )
-    print(f"\n【指定した年の集計】（{recent_start}年〜{recent_end}年）")
+    print(f"{_section('指定した年の集計')}（{recent_start}年〜{recent_end}年）")
     print(f"  論文数            : {report['recent_count']}")
     print(f"  総引用回数        : {report['recent_citations']}")
     print(f"  筆頭著者論文数    : {report['recent_first_author']}")
-    print("\n【引用指標】")
+    print(_section("引用指標"))
     print(f"  H-index: {report['h_index']}")
     print(f"  G-index: {report['g_index']}")
     top5 = sorted(papers, key=lambda x: x["citations"], reverse=True)[:5]
-    print("\n【被引用数上位5件】")
+    print(_section("被引用数上位5件"))
     for i, p in enumerate(top5, 1):
         print(f"  {i}. {p['title']}")
         if p.get("authors"):
@@ -100,19 +140,119 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
             print(f"     EID       : {p['eid']}")
         print("")
 
+def print_kaken_researcher_results(query, results):
+    """KAKEN研究者検索結果をコンソールに表示する"""
+    if not results:
+        print(f"No KAKEN researcher found for: {query}")
+        return
+    print(f"\n{_hr()}")
+    print(f"KAKEN Researcher results for '{query}'")
+    print(f"{_hr()}\n")
+    print(f"Found {len(results)} researcher(s):\n")
+    for r in results:
+        print(f"  研究者番号  : {r.get('researcher_id', '')}")
+        print(f"  氏名        : {r.get('name', '')}")
+        if r.get("name_kana"):
+            print(f"  カナ        : {r['name_kana']}")
+        print(f"  所属        : {r.get('affiliation', '')}")
+        if r.get("department"):
+            print(f"  部局        : {r['department']}")
+        if r.get("job_title"):
+            print(f"  職名        : {r['job_title']}")
+        if r.get("project_count"):
+            print(f"  研究課題数  : {r['project_count']}")
+        print(_hr("-"))
+
+
+def print_kaken_summary(researcher_id, researcher, grants):
+    """KAKEN獲得課題サマリーを人間可読形式で表示する"""
+    print(_hr())
+    print(f"研究者番号 : {researcher_id}")
+    if researcher:
+        print(f"氏名       : {researcher.get('name', '')}")
+        if researcher.get("affiliation"):
+            print(f"所属       : {researcher['affiliation']}")
+    print(_hr())
+
+    if not grants:
+        print("該当する科研費課題は見つかりませんでした。")
+        return
+
+    # 統計
+    role_counts = {}
+    type_counts = {}
+    for g in grants:
+        role = g.get("my_role") or "(未確定)"
+        role_counts[role] = role_counts.get(role, 0) + 1
+        gt = g.get("grant_category") or "(不明)"
+        type_counts[gt] = type_counts.get(gt, 0) + 1
+
+    print(f"{_section('獲得課題総数')} {len(grants)} 件")
+    print(_section("役割別"))
+    for role, n in sorted(role_counts.items(), key=lambda x: -x[1]):
+        print(f"  {role:30s}: {n} 件")
+    print(_section("研究種目別"))
+    for gt, n in sorted(type_counts.items(), key=lambda x: -x[1]):
+        print(f"  {gt:30s}: {n} 件")
+
+    print(_section("総配分額"))
+    total_sum = sum(int(g["total_cost"]) for g in grants if str(g.get("total_cost") or "").isdigit())
+    direct_sum = sum(int(g["direct_cost"]) for g in grants if str(g.get("direct_cost") or "").isdigit())
+    print(f"  直接経費合計: {direct_sum:,} 円")
+    print(f"  総額合計    : {total_sum:,} 円")
+
+    print(_section("課題一覧（古い順）"))
+    for i, g in enumerate(grants, 1):
+        period = ""
+        if g.get("period_from") and g.get("period_to"):
+            period = f"{g['period_from']}〜{g['period_to']}年度"
+        elif g.get("period_from"):
+            period = f"{g['period_from']}年度〜"
+        print(f"\n  {i}. {g.get('title') or '(無題)'}")
+        if g.get("project_number"):
+            print(f"     課題番号 : {g['project_number']}")
+        if g.get("grant_category"):
+            cat = g["grant_category"]
+            if g.get("allocation"):
+                cat = f"{cat} ({g['allocation']})"
+            print(f"     研究種目 : {cat}")
+        if g.get("review_section"):
+            print(f"     審査区分 : {g['review_section']}")
+        if period:
+            print(f"     研究期間 : {period}")
+        if g.get("institution"):
+            print(f"     研究機関 : {g['institution']}")
+        if g.get("status"):
+            print(f"     ステータス: {g['status']}")
+        if g.get("my_role"):
+            print(f"     役割     : {g['my_role']}")
+        if g.get("total_cost") and str(g["total_cost"]).isdigit():
+            tc = int(g["total_cost"])
+            dc = int(g["direct_cost"]) if str(g.get("direct_cost") or "").isdigit() else None
+            line = f"     配分額   : 総額 {tc:,} 円"
+            if dc is not None:
+                line += f"（直接経費 {dc:,} 円）"
+            print(line)
+        if g.get("keywords"):
+            kws = ", ".join(g["keywords"][:8])
+            print(f"     キーワード: {kws}")
+
+
 def process_batch_summary(input_path, output_path, client, year_range=None):
     """CSV の Scopus ID 列を一括処理してサマリーCSVを出力する"""
     import csv
     from scopus_tools.core import summarize_papers
-    df = read_input_csv(input_path)
+    df = read_input_csv(input_path, required_cols=["Scopus ID"])
+    total = len(df)
     results = []
-    for _, row in df.iterrows():
+    for idx, (_, row) in enumerate(df.iterrows(), start=1):
         name = row.get("Name", "")
         scopus_id_value = row.get("Scopus ID")
         affiliation = row.get("Affiliation", "")
         if not scopus_id_value or (hasattr(scopus_id_value, "__class__") and str(scopus_id_value) == "nan"):
             logging.warning("Missing Scopus ID for %s, skipping.", name)
             continue
+        progress(f"[{idx}/{total}] processing: {name or scopus_id_value}")
         s_ids = [s.strip() for s in str(scopus_id_value).split(",") if s.strip()]
         first, last = client.get_author_profile(s_ids[0])
         papers = client.search_papers(s_ids)
@@ -135,6 +275,7 @@ def process_batch_summary(input_path, output_path, client, year_range=None):
             "H-index": report["h_index"],
             "G-index": report["g_index"],
         })
+    progress_done()
     if results:
         fieldnames = [
             "Name", "Scopus IDs", "Affiliation", "Research Years", "Start Year",

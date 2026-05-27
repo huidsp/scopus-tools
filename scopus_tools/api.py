@@ -2,6 +2,8 @@ import requests
 import os
 import logging
 
+from scopus_tools.utils import progress, progress_done
+
 logger = logging.getLogger(__name__)
 
 class ScopusClient:
@@ -94,12 +96,9 @@ class ScopusClient:
             total_pages = (total + page_size - 1) // page_size if total > 0 else 0
             current_page = (start // page_size) + 1 if total_pages > 0 else 0
             fetched_records = min(start + len(entries), total) if total > 0 else 0
-            logger.info(
-                "Scopus取得進捗: %d/%d ページ (%d/%d 件)",
-                current_page,
-                total_pages,
-                fetched_records,
-                total,
+            progress(
+                f"  Scopus fetch: page {current_page}/{total_pages} "
+                f"({fetched_records}/{total} entries)"
             )
             logger.debug("Retrieved %d entries (total=%d)", len(entries), total)
 
@@ -143,6 +142,7 @@ class ScopusClient:
                     papers_dict[eid] = new_entry
             start += page_size
 
+        progress_done()
         logger.info("Search complete: %d unique papers found.", len(papers_dict))
         return list(papers_dict.values())
 

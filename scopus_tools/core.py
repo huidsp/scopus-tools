@@ -35,6 +35,21 @@ def resolve_year_range(year_range=None, recent_years=5, current_year=None):
     start_y = current_year - (recent_years - 1)
     return start_y, current_year
 
+
+def default_eval_year_range(default_years=5, current_year=None):
+    """ユーザ向けの「評価期間」既定値: **前年を含む** 直近 default_years 年。
+
+    例: 2026 年中の実行 → (2021, 2025)
+    集計のフィルタは年単位で行うため、進行中の今年を含めると半年ぶんしか
+    データが揃わず歪むのを避けるための既定。
+    """
+    import datetime
+
+    current_year = current_year or datetime.datetime.now().year
+    end_y = current_year - 1
+    start_y = end_y - (default_years - 1)
+    return (start_y, end_y)
+
 def summarize_papers(papers, recent_years=5, year_range=None):
     """論文リストから統計情報を抽出する"""
     import datetime

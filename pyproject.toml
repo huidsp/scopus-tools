@@ -10,10 +10,12 @@ dependencies = [
     "pandas",
     "python-dotenv",
     "openai",
+    "anthropic",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ui = ["gradio>=4.0"]
 
 [project.scripts]
 scopus-tools = "scopus_tools.cli:main"
