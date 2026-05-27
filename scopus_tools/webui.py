@@ -886,13 +886,22 @@ def _compare_tuple_from(updates):
 # Layout
 # ---------------------------------------------------------------------------
 
+_FONT_CSS = """
+.gradio-container, .gradio-container * {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                 "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo",
+                 "Noto Sans CJK JP", "Noto Sans JP", system-ui, sans-serif;
+}
+"""
+
+
 def build_app(store=None):
     import gradio as gr
 
     if store is None:
         store = ProjectStore()
 
-    with gr.Blocks(title="scopus-tools UI", theme=gr.themes.Soft()) as app:
+    with gr.Blocks(title="scopus-tools UI", theme=gr.themes.Soft(), css=_FONT_CSS) as app:
         gr.Markdown("# scopus-tools 研究者業績ビューア")
         gr.Markdown(_env_banner())
 
