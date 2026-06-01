@@ -176,6 +176,20 @@ def _ai_status_md(scopus_state, kaken_state):
     return "\n\n".join(lines)
 
 
+def _papers_md(first, last, scopus_ids, papers, year_range):
+    """指定期間の論文一覧(著者順位付き)を Markdown 文字列にして返す。"""
+    from scopus_tools import utils
+    recent = [p for p in papers if year_range[0] <= p.get("year", 0) <= year_range[1]]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        utils.print_papers_list(first, last, scopus_ids, recent, year_range, header=False)
+    return (
+        f"### 📄 指定期間の論文一覧 "
+        f"({year_range[0]}–{year_range[1]} / {len(recent)} 件)\n"
+        f"```\n{buf.getvalue()}\n```"
+    )
+
+
 def _env_banner():
     scopus_ok, ai_ok, kaken_ok, openai_ok, anthropic_ok = _check_keys()
     lines = []
@@ -258,18 +272,18 @@ def _scopus_run(store, project_name, researcher_name, scopus_ids, year_start, ye
         scopus_ids = [scopus_ids] if scopus_ids else []
     scopus_ids = [str(s) for s in (scopus_ids or []) if s]
     if not scopus_ids:
-        return None, "", "⚠️ Scopus 候補を 1 件以上チェックしてください", _ai_status_md(None, None)
+        return None, "", "", "⚠️ Scopus 候補を 1 件以上チェックしてください", _ai_status_md(None, None)
 
     try:
         year_range = (int(year_start), int(year_end))
     except (TypeError, ValueError):
-        return None, "", "❌ 年範囲が不正です(整数で指定してください)", _ai_status_md(None, None)
+        return None, "", "", "❌ 年範囲が不正です(整数で指定してください)", _ai_status_md(None, None)
     if year_range[0] > year_range[1]:
-        return None, "", "❌ 開始年は終了年以下にしてください", _ai_status_md(None, None)
+        return None, "", "", "❌ 開始年は終了年以下にしてください", _ai_status_md(None, None)
 
     scopus_ok, *_ = _check_keys()
     if not scopus_ok:
-        return None, "", "❌ `SCOPUS_API_KEY` が未設定です", _ai_status_md(None, None)
+        return None, "", "", "❌ `SCOPUS_API_KEY` が未設定です", _ai_status_md(None, None)
 
     progress(0.2, desc=f"Scopus から論文を取得中…({len(scopus_ids)} ID 統合)")
     try:
@@ -278,7 +292,7 @@ def _scopus_run(store, project_name, researcher_name, scopus_ids, year_start, ye
         first, last = client.get_author_profile(scopus_ids[0])
     except Exception as e:  # noqa: BLE001
         logger.exception("Scopus fetch failed")
-        return None, "", f"❌ Scopus 取得でエラーが発生しました: {e}", _ai_status_md(None, None)
+        return None, "", "", f"❌ Scopus 取得でエラーが発生しました: {e}", _ai_status_md(None, None)
 
     report = core.summarize_papers(papers, year_range=year_range)
 
@@ -286,6 +300,9 @@ def _scopus_run(store, project_name, researcher_name, scopus_ids, year_start, ye
     with contextlib.redirect_stdout(buf):
         utils.print_report_text(first, last, scopus_ids, report, papers, year_range=year_range)
     biblio_md = f"```\n{buf.getvalue()}\n```"
+
+    # 指定期間の論文一覧(著者順位付き)— 「論文一覧」タブで表示
+    papers_md = _papers_md(first, last, scopus_ids, papers, year_range)
 
     state = {
         "scopus_ids": scopus_ids,
@@ -305,9 +322,10 @@ def _scopus_run(store, project_name, researcher_name, scopus_ids, year_start, ye
         "papers": papers, "report": report,
         "year_range": list(year_range),
         "biblio_md": biblio_md,
+        "papers_md": papers_md,
         "run_status": status,
     })
-    return state, biblio_md, status, _ai_status_md(state, None)
+    return state, biblio_md, papers_md, status, _ai_status_md(state, None)
 
 
 def _kaken_search(store, project_name, researcher_name, name, progress):
@@ -413,7 +431,7 @@ def _kaken_run(store, project_name, researcher_name, kaken_selected_ids, kaken_m
 
 
 def _ai_run(store, project_name, researcher_name, scopus_state, kaken_state, lang,
-            extra_instructions, model, progress):
+            extra_instructions, model, paper_mode, progress):
     from scopus_tools import ai_engine
 
     key = llm.required_key_for(model)
@@ -424,8 +442,10 @@ def _ai_run(store, project_name, researcher_name, scopus_state, kaken_state, lan
         yield "", "⚠️ 先に Scopus タブで集計を実行してください"
         return
 
+    paper_mode = paper_mode or "first_author"
     papers = scopus_state["papers"]
     report = scopus_state["report"]
+    year_range = scopus_state.get("year_range")
     grants = (kaken_state or {}).get("grants")
     n_papers = len(papers)
     n_grants = len(grants) if grants else 0
@@ -455,6 +475,7 @@ def _ai_run(store, project_name, researcher_name, scopus_state, kaken_state, lan
             field_ctx=field_ctx,
             extra_instructions=extra_instructions,
             model=model,
+            paper_list_mode=paper_mode, year_range=year_range,
         ):
             last = partial
             yield partial, f"⏳ 生成中…({len(partial)} 文字, model={model})"
@@ -466,6 +487,7 @@ def _ai_run(store, project_name, researcher_name, scopus_state, kaken_state, lan
         _save_researcher_section(store, project_name, researcher_name, "ai", {
             "lang": lang or "ja",
             "model": model,
+            "paper_mode": paper_mode,
             "evaluation": last,
             "run_status": err_status,
             "extra_instructions": extra_instructions or "",
@@ -479,6 +501,7 @@ def _ai_run(store, project_name, researcher_name, scopus_state, kaken_state, lan
     _save_researcher_section(store, project_name, researcher_name, "ai", {
         "lang": lang or "ja",
         "model": model,
+        "paper_mode": paper_mode,
         "evaluation": last,
         "run_status": final_status,
         "extra_instructions": extra_instructions or "",
@@ -701,9 +724,10 @@ def _compare_run(store, project_name, selected_names, lang, extra_instructions, 
 _RIGHT_OUTPUT_KEYS = [
     "s_name", "s_search_status", "s_select",
     "s_year_start", "s_year_end", "s_run_status", "s_result",
+    "s_papers_result",
     "k_name", "k_search_status", "k_select", "k_manual",
     "k_run_status", "k_result",
-    "ai_status_display", "ai_lang", "ai_model", "ai_extra",
+    "ai_status_display", "ai_lang", "ai_model", "ai_extra", "ai_paper_mode",
     "ai_run_status", "ai_result",
     "scopus_state", "kaken_state",
 ]
@@ -788,6 +812,7 @@ def _empty_right_pane_updates(researcher_name=None):
         "s_year_end": gr.update(value=default_end),
         "s_run_status": gr.update(value=""),
         "s_result": gr.update(value=""),
+        "s_papers_result": gr.update(value=""),
         "k_name": gr.update(value=default_name),
         "k_search_status": gr.update(value=""),
         "k_select": gr.update(choices=[], value=[], visible=False),
@@ -798,6 +823,7 @@ def _empty_right_pane_updates(researcher_name=None):
         "ai_lang": gr.update(value="ja"),
         "ai_model": gr.update(value=llm.DEFAULT_MODEL),
         "ai_extra": gr.update(value=""),
+        "ai_paper_mode": gr.update(value="first_author"),
         "ai_run_status": gr.update(value=""),
         "ai_result": gr.update(value=""),
         "scopus_state": None,
@@ -828,6 +854,7 @@ def _researcher_to_updates(researcher):
             updates["s_year_start"] = gr.update(value=ys)
             updates["s_year_end"] = gr.update(value=ye)
         updates["s_result"] = gr.update(value=s.get("biblio_md", ""))
+        updates["s_papers_result"] = gr.update(value=s.get("papers_md", ""))
         updates["s_run_status"] = gr.update(value=s.get("run_status", ""))
         if s.get("papers"):
             updates["scopus_state"] = {
@@ -865,6 +892,7 @@ def _researcher_to_updates(researcher):
         updates["ai_lang"] = gr.update(value=a.get("lang", "ja"))
         updates["ai_model"] = gr.update(value=a.get("model", llm.DEFAULT_MODEL))
         updates["ai_extra"] = gr.update(value=a.get("extra_instructions", ""))
+        updates["ai_paper_mode"] = gr.update(value=a.get("paper_mode", "first_author"))
         updates["ai_result"] = gr.update(value=a.get("evaluation", ""))
         updates["ai_run_status"] = gr.update(value=a.get("run_status", ""))
 
@@ -996,7 +1024,17 @@ def build_app(store=None):
                         s_copy_btn = gr.Button("📋 コピー", scale=0)
                         s_download_btn = gr.Button("📤 エクスポート", scale=0)
 
-                with gr.Tab("2. KAKEN"):
+                with gr.Tab("2. 論文一覧"):
+                    gr.Markdown(
+                        "Scopus タブで「Scopus 集計を実行」すると、指定期間の論文一覧が"
+                        "ここに表示されます(各論文に著者順位 `n/m` 付き)。"
+                    )
+                    s_papers_result = gr.Markdown()
+                    with gr.Row():
+                        s_papers_copy_btn = gr.Button("📋 コピー", scale=0)
+                        s_papers_download_btn = gr.Button("📤 エクスポート", scale=0)
+
+                with gr.Tab("3. KAKEN"):
                     with gr.Row():
                         k_name = gr.Textbox(label="研究者名", placeholder="例: 岡村 寛之", scale=4)
                         k_search_btn = gr.Button("KAKEN 候補検索", variant="primary", scale=1)
@@ -1016,7 +1054,7 @@ def build_app(store=None):
                         k_copy_btn = gr.Button("📋 コピー", scale=0)
                         k_download_btn = gr.Button("📤 エクスポート", scale=0)
 
-                with gr.Tab("3. AI 評価"):
+                with gr.Tab("4. AI 評価"):
                     ai_status_display = gr.Markdown(_ai_status_md(None, None))
                     ai_extra = gr.Textbox(
                         label="評価の観点・追加指示(任意)",
@@ -1026,6 +1064,14 @@ def build_app(store=None):
                             "若手研究者として評価(博士取得後 5 年)"
                         ),
                         lines=2,
+                    )
+                    ai_paper_mode = gr.Radio(
+                        label="論文情報の渡し方",
+                        choices=[
+                            ("被引用トップ10＋著者順位（推奨・省トークン）", "first_author"),
+                            ("評価期間内の全論文＋著者順位（網羅）", "period_full"),
+                        ],
+                        value="first_author",
                     )
                     with gr.Row():
                         ai_model = gr.Dropdown(
@@ -1047,7 +1093,7 @@ def build_app(store=None):
                         ai_copy_btn = gr.Button("📋 コピー", scale=0)
                         ai_download_btn = gr.Button("📤 エクスポート", scale=0)
 
-                with gr.Tab("4. 比較"):
+                with gr.Tab("5. 比較"):
                     gr.Markdown(
                         "プロジェクト内の研究者を選んで横並び比較します。"
                         "**人事選考用**: 各人の推定分野を踏まえた AI 比較評価も生成可能。"
@@ -1102,9 +1148,10 @@ def build_app(store=None):
         right_outputs = [
             s_name, s_search_status, s_select,
             s_year_start, s_year_end, s_run_status, s_result,
+            s_papers_result,
             k_name, k_search_status, k_select, k_manual,
             k_run_status, k_result,
-            ai_status_display, ai_lang, ai_model, ai_extra,
+            ai_status_display, ai_lang, ai_model, ai_extra, ai_paper_mode,
             ai_run_status, ai_result,
             scopus_state, kaken_state,
         ]
@@ -1410,9 +1457,9 @@ def build_app(store=None):
 
         def _do_scopus_run(pname, rname, ids, ys, ye, kstate, progress=gr.Progress()):
             if not pname or not rname:
-                return None, "", "⚠️ 先にプロジェクトと研究者を選択してください", _ai_status_md(None, None), gr.update()
-            state, biblio, status, _ = _scopus_run(store, pname, rname, ids, ys, ye, progress)
-            return state, biblio, status, _ai_status_md(state, kstate), _refresh_researcher_radio(pname)
+                return None, "", "", "⚠️ 先にプロジェクトと研究者を選択してください", _ai_status_md(None, None), gr.update()
+            state, biblio, papers_md, status, _ = _scopus_run(store, pname, rname, ids, ys, ye, progress)
+            return state, biblio, papers_md, status, _ai_status_md(state, kstate), _refresh_researcher_radio(pname)
 
         def _do_kaken_search(pname, rname, name, progress=gr.Progress()):
             if not pname or not rname:
@@ -1426,13 +1473,14 @@ def build_app(store=None):
             state, kmd, status, _ = _kaken_run(store, pname, rname, ids, manual, progress)
             return state, kmd, status, _ai_status_md(sstate, state), _refresh_researcher_radio(pname)
 
-        def _do_ai_run(pname, rname, sstate, kstate, lang, model, extra, progress=gr.Progress()):
+        def _do_ai_run(pname, rname, sstate, kstate, lang, model, extra, paper_mode,
+                       progress=gr.Progress()):
             if not pname or not rname:
                 yield "", "⚠️ 先にプロジェクトと研究者を選択してください", gr.update()
                 return
             ai_md, status = "", ""
             for ai_md, status in _ai_run(store, pname, rname, sstate, kstate, lang,
-                                         extra, model, progress):
+                                         extra, model, paper_mode, progress):
                 yield ai_md, status, gr.update()
             yield ai_md, status, _refresh_researcher_radio(pname)
 
@@ -1445,7 +1493,8 @@ def build_app(store=None):
         s_run_btn.click(_do_scopus_run,
                         inputs=[current_project_name, current_researcher_name,
                                 s_select, s_year_start, s_year_end, kaken_state],
-                        outputs=[scopus_state, s_result, s_run_status, ai_status_display, researcher_radio])
+                        outputs=[scopus_state, s_result, s_papers_result, s_run_status,
+                                 ai_status_display, researcher_radio])
 
         k_search_btn.click(_do_kaken_search,
                            inputs=[current_project_name, current_researcher_name, k_name],
@@ -1460,7 +1509,8 @@ def build_app(store=None):
 
         ai_run_btn.click(_do_ai_run,
                          inputs=[current_project_name, current_researcher_name,
-                                 scopus_state, kaken_state, ai_lang, ai_model, ai_extra],
+                                 scopus_state, kaken_state, ai_lang, ai_model, ai_extra,
+                                 ai_paper_mode],
                          outputs=[ai_result, ai_run_status, researcher_radio])
 
         # ---- Comparison tab handlers
@@ -1490,6 +1540,9 @@ def build_app(store=None):
         s_copy_btn.click(fn=None, inputs=[s_result], outputs=[], js=_COPY_JS)
         s_download_btn.click(fn=None, inputs=[s_result], outputs=[],
                              js=_download_js("scopus_summary"))
+        s_papers_copy_btn.click(fn=None, inputs=[s_papers_result], outputs=[], js=_COPY_JS)
+        s_papers_download_btn.click(fn=None, inputs=[s_papers_result], outputs=[],
+                                    js=_download_js("scopus_papers"))
         k_copy_btn.click(fn=None, inputs=[k_result], outputs=[], js=_COPY_JS)
         k_download_btn.click(fn=None, inputs=[k_result], outputs=[],
                              js=_download_js("kaken_summary"))

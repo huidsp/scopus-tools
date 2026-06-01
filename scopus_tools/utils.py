@@ -18,6 +18,21 @@ def _section(label):
     return f"\n【{label}】"
 
 
+def format_author_position(p):
+    """著者順位を 'n/m' 形式で返す(筆頭著者なら ' (first)' を付す)。
+
+    順位・著者数が不明なら空文字列。
+    """
+    pos = p.get("author_position")
+    cnt = p.get("author_count")
+    if not pos or not cnt:
+        return ""
+    s = f"{pos}/{cnt}"
+    if pos == 1:
+        s += " (first)"
+    return s
+
+
 def setup_logging(level=logging.INFO):
     logging.basicConfig(
         level=level,
@@ -124,6 +139,9 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
         print(f"  {i}. {p['title']}")
         if p.get("authors"):
             print(f"     著者      : {p['authors']}")
+        pos = format_author_position(p)
+        if pos:
+            print(f"     著者順位  : {pos}")
         if p.get("journal"):
             agg = f" [{p['aggregation_type']}]" if p.get("aggregation_type") else ""
             print(f"     ジャーナル: {p['journal']}{agg}")
@@ -139,6 +157,83 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
         if p.get("eid"):
             print(f"     EID       : {p['eid']}")
         print("")
+
+def print_papers_list(first, last, s_ids, papers, year_range, header=True):
+    """指定年範囲の論文一覧を人間が読みやすい形式で表示する。
+
+    papers は呼び出し側で年範囲フィルタ済みを想定。新しい順に並べて表示する。
+    header=False ならタイトル等のヘッダ行を省略し一覧本体のみ出力する(WebUI 再利用用)。
+    """
+    start_y, end_y = year_range
+    if header:
+        print(_hr())
+        print(f"Scopus IDs: {', '.join(s_ids)}")
+        print(f"Name      : {first} {last}".strip())
+        print(f"対象期間  : {start_y}年〜{end_y}年")
+        print(f"該当論文数: {len(papers)} 件")
+        print(_hr())
+    ordered = sorted(papers, key=lambda x: (x.get("year", 0), x.get("citations", 0)), reverse=True)
+    for i, p in enumerate(ordered, 1):
+        print(f"\n  {i}. {p.get('title') or '(無題)'}")
+        if p.get("authors"):
+            print(f"     著者      : {p['authors']}")
+        pos = format_author_position(p)
+        if pos:
+            print(f"     著者順位  : {pos}")
+        if p.get("journal"):
+            agg = f" [{p['aggregation_type']}]" if p.get("aggregation_type") else ""
+            print(f"     ジャーナル: {p['journal']}{agg}")
+        biblio = []
+        if p.get("volume"):  biblio.append(f"Vol.{p['volume']}")
+        if p.get("issue"):   biblio.append(f"No.{p['issue']}")
+        if p.get("pages"):   biblio.append(f"pp.{p['pages']}")
+        if p.get("year"):    biblio.append(str(p["year"]))
+        if biblio:
+            print(f"     書誌      : {', '.join(biblio)}")
+        if p.get("type"):
+            print(f"     種別      : {p['type']}")
+        print(f"     引用数    : {p.get('citations', 0)}")
+        if p.get("eid"):
+            print(f"     EID       : {p['eid']}")
+
+
+def save_papers_csv(rows, output_path):
+    """論文一覧を CSV に保存する(Excel 互換の utf-8-sig)。
+
+    rows は (s_ids, first, last, papers) のリスト。複数著者ぶんを 1 ファイルに縦結合し、
+    どの著者の論文かを Name / Scopus IDs 列で識別できるようにする。
+    """
+    fieldnames = [
+        "Name", "Scopus IDs", "Year", "Title", "Authors", "Journal",
+        "Volume", "Issue", "Pages", "Type", "Citations",
+        "Author Position", "Author Count", "First Author", "EID",
+    ]
+    out = []
+    for s_ids, first, last, papers in rows:
+        name = f"{first} {last}".strip()
+        ids = ", ".join(s_ids)
+        ordered = sorted(papers, key=lambda x: (x.get("year", 0), x.get("citations", 0)), reverse=True)
+        for p in ordered:
+            out.append({
+                "Name": name,
+                "Scopus IDs": ids,
+                "Year": p.get("year", ""),
+                "Title": p.get("title", ""),
+                "Authors": p.get("authors", ""),
+                "Journal": p.get("journal", ""),
+                "Volume": p.get("volume", ""),
+                "Issue": p.get("issue", ""),
+                "Pages": p.get("pages", ""),
+                "Type": p.get("type", ""),
+                "Citations": p.get("citations", 0),
+                "Author Position": format_author_position(p),
+                "Author Count": p.get("author_count", ""),
+                "First Author": "Yes" if p.get("is_first_author") else "",
+                "EID": p.get("eid", ""),
+            })
+    df = pd.DataFrame(out, columns=fieldnames)
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+
 
 def print_kaken_researcher_results(query, results):
     """KAKEN研究者検索結果をコンソールに表示する"""

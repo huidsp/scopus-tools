@@ -113,10 +113,16 @@ class ScopusClient:
                 auth_list = [a.get("authname") for a in authors]
 
                 first_author_flag = False
+                author_position = None
                 if authors:
                     first_authid = authors[0].get("authid")
                     if first_authid in author_ids:
                         first_author_flag = True
+                    # クエリした著者(複数IDなら最初に一致したもの)が何番目かを求める
+                    for pos, a in enumerate(authors, start=1):
+                        if a.get("authid") in author_ids:
+                            author_position = pos
+                            break
 
                 new_entry = {
                     "title": e.get("dc:title"),
@@ -132,12 +138,20 @@ class ScopusClient:
                     "auth_list": auth_list,
                     "authors": ", ".join(a for a in auth_list if a),
                     "is_first_author": first_author_flag,
+                    "author_position": author_position,
+                    "author_count": len(authors),
                 }
 
                 if eid in papers_dict:
-                    # 重複EIDはcitationsの最大値とis_first_authorのORでマージ
+                    # 重複EIDはcitationsの最大値とis_first_authorのORでマージ。
+                    # author_position はより筆頭に近い(小さい)値を採用。
                     papers_dict[eid]["citations"] = max(papers_dict[eid]["citations"], new_entry["citations"])
                     papers_dict[eid]["is_first_author"] = papers_dict[eid]["is_first_author"] or first_author_flag
+                    existing_pos = papers_dict[eid].get("author_position")
+                    if author_position is not None and (existing_pos is None or author_position < existing_pos):
+                        papers_dict[eid]["author_position"] = author_position
+                    if not papers_dict[eid].get("author_count"):
+                        papers_dict[eid]["author_count"] = len(authors)
                 else:
                     papers_dict[eid] = new_entry
             start += page_size

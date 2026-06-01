@@ -153,17 +153,37 @@ def infer_field(papers, model=DEFAULT_MODEL):
     return _infer_field_context(model, titles) if titles else {}
 
 
-def _build_eval_prompt(papers, report, lang, grants, field_ctx, extra_instructions=None):
+def _build_eval_prompt(papers, report, lang, grants, field_ctx, extra_instructions=None,
+                       paper_list_mode="first_author", year_range=None):
     """評価プロンプトの本文を組み立てる(stream/非 stream で共通)。
 
     extra_instructions に文字列を渡すと「【評価の観点・追加指示】」セクションが末尾に
     追加される(ユーザが UI から入力した自由形式の指示)。
+
+    paper_list_mode:
+      - "first_author" (既定): 被引用数トップ 10 論文を著者順位付きで渡す(省トークン)。
+      - "period_full": year_range 内の論文を全件、著者順位付きで渡す(網羅性重視。
+        year_range が None なら全期間の全論文)。
     """
-    top_papers = sorted(papers, key=lambda x: x["citations"], reverse=True)[:10]
-    top_titles = "\n".join(
-        f"  - {p['title']} [{p.get('journal') or '不明'}] (citations: {p['citations']}, year: {p['year']})"
-        for p in top_papers
-    )
+    from scopus_tools.utils import format_author_position
+
+    def _paper_line(p):
+        pos = format_author_position(p)
+        pos_str = f", 著者順位: {pos}" if pos else ""
+        return (f"  - {p['title']} [{p.get('journal') or '不明'}] "
+                f"(citations: {p['citations']}, year: {p['year']}{pos_str})")
+
+    if paper_list_mode == "period_full":
+        if year_range:
+            listed = [p for p in papers if year_range[0] <= p.get("year", 0) <= year_range[1]]
+        else:
+            listed = list(papers)
+        listed = sorted(listed, key=lambda x: (x.get("year", 0), x.get("citations", 0)), reverse=True)
+        paper_section_title = f"評価期間内の論文一覧（著者順位付き・{len(listed)} 件）"
+    else:  # "first_author"
+        listed = sorted(papers, key=lambda x: x["citations"], reverse=True)[:10]
+        paper_section_title = "被引用数上位論文（著者順位付き・ジャーナル名含む）"
+    top_titles = "\n".join(_paper_line(p) for p in listed)
 
     journal_summary = _build_journal_summary(papers)
     journal_lines = "\n".join(
@@ -245,37 +265,46 @@ def _build_eval_prompt(papers, report, lang, grants, field_ctx, extra_instructio
 【掲載ジャーナル一覧（被引用数順、上位15誌）】
 {journal_lines}
 
-【被引用数上位論文（ジャーナル名含む）】
+【{paper_section_title}】
 {top_titles}
 {kaken_section}
 上記データをもとに、推定された研究分野の慣例・水準と照らし合わせながら、以下の観点で忖度なく研究者を総合評価してください：
 {eval_points}
 {extra_section}
+各論文に付された著者順位（n/m、1番目なら first）も、その研究者が筆頭著者・主導的立場で
+行った研究か、共著・支援的立場かを判断する材料として、研究の主導性の観点から考慮してください。
 分野の違いによるバイアスを補正した上で、具体的かつ建設的に{lang}で記述してください。
 """
 
 
 def evaluate_achievements(papers, report, lang="ja", grants=None,
-                          extra_instructions=None, model=DEFAULT_MODEL):
-    """業績指標と論文リストに基づいて AI が研究者を総合評価する(非ストリーミング)。"""
+                          extra_instructions=None, model=DEFAULT_MODEL,
+                          paper_list_mode="first_author", year_range=None):
+    """業績指標と論文リストに基づいて AI が研究者を総合評価する(非ストリーミング)。
+
+    paper_list_mode は `_build_eval_prompt` を参照(既定 "first_author")。
+    """
     key = llm.required_key_for(model)
     if not os.getenv(key):
         return f"{key} not found. Skipping evaluation."
 
     field_ctx = _infer_field_context(model, [p["title"] for p in papers])
     prompt = _build_eval_prompt(papers, report, lang, grants, field_ctx,
-                                extra_instructions=extra_instructions)
+                                extra_instructions=extra_instructions,
+                                paper_list_mode=paper_list_mode, year_range=year_range)
     return llm.complete(model, prompt)
 
 
 def evaluate_achievements_stream(papers, report, lang="ja", grants=None,
                                  field_ctx=None, extra_instructions=None,
-                                 model=DEFAULT_MODEL):
+                                 model=DEFAULT_MODEL,
+                                 paper_list_mode="first_author", year_range=None):
     """`evaluate_achievements` のストリーミング版。累積テキストを順次 yield する。
 
     field_ctx を渡すと内部の `_infer_field_context` 呼び出しを省略できる
     (WebUI 側で先に推定して保存している場合の最適化)。
     extra_instructions はユーザが UI に入力した自由形式の評価観点・追加指示。
+    paper_list_mode は `_build_eval_prompt` を参照(既定 "first_author")。
     model でプロバイダを選択(既定: gpt-5.4)。
     """
     key = llm.required_key_for(model)
@@ -286,7 +315,8 @@ def evaluate_achievements_stream(papers, report, lang="ja", grants=None,
     if field_ctx is None:
         field_ctx = _infer_field_context(model, [p["title"] for p in papers])
     prompt = _build_eval_prompt(papers, report, lang, grants, field_ctx,
-                                extra_instructions=extra_instructions)
+                                extra_instructions=extra_instructions,
+                                paper_list_mode=paper_list_mode, year_range=year_range)
 
     last = ""
     for partial in llm.stream(model, prompt):

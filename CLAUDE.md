@@ -9,7 +9,7 @@ and LLMs (OpenAI and Anthropic Claude) to fetch researcher data, compute bibliom
 (H-index, G-index, citations, first-author counts), pull KAKEN grant histories, and produce
 field-normalized AI evaluations. It ships:
 
-- A CLI (`scopus-tools`) with 9 subcommands.
+- A CLI (`scopus-tools`) with 10 subcommands.
 - A Gradio WebUI (`scopus-tools webui`) with a project-based hierarchical workspace
   (project → multiple researchers → Scopus / KAKEN / AI / comparison panels) that
   persists everything to JSON files.
@@ -52,6 +52,9 @@ CLI subcommands (see `scopus_tools/cli.py`):
 - `search` — Scopus ID lookup by name (single `--name` or batch `--input/--output` CSV).
 - `stats` — paper / citation counts per year range; requires `--years`.
 - `summary` — human-readable per-author report; supports `--input` CSV mode and `--format json`.
+- `papers` — list papers published in a given `--years` range; positional IDs or `--input` CSV,
+  `--format text|json|csv` (csv requires `--output`). Each paper carries `author_position` /
+  `author_count` (shown as `2/3`, `1/4 (first)`) computed in `api.search_papers`.
 - `batch` — CSV-in / CSV-out summary across many authors.
 - `analyze` — AI-based expertise estimation from paper titles; takes `--model`.
 - `eval` — AI-based comprehensive field-normalized evaluation; supports `--kaken-id`,
@@ -108,10 +111,15 @@ Two control flows:
   - `estimate_expertise(papers, lang, model)` — short expertise summary.
   - `infer_field(papers, model)` and `_infer_field_context(model, all_titles)` — field
     estimation in JSON mode (Anthropic uses prompt instruction + brace extraction).
-  - `evaluate_achievements(papers, report, lang, grants, extra_instructions, model)` — full
-    field-normalized evaluation.
-  - `evaluate_achievements_stream(..., field_ctx=None, ...)` — streaming version. Pass
+  - `evaluate_achievements(papers, report, lang, grants, extra_instructions, model, paper_list_mode, year_range)` — full
+    field-normalized evaluation. `paper_list_mode` selects how papers are fed to the prompt:
+    `"first_author"` (default) = top-10 cited with author position `n/m`; `"period_full"` =
+    all `year_range` papers with author position. Author position comes from `api.search_papers`
+    (`author_position` / `author_count`); the prompt always asks the model to weigh research
+    leadership (first vs co-author).
+  - `evaluate_achievements_stream(..., field_ctx=None, ..., paper_list_mode, year_range)` — streaming version. Pass
     `field_ctx` to skip the inference call (WebUI caches it in `researcher.ai.field_ctx`).
+    The WebUI AI tab exposes `paper_list_mode` as a radio (saved in `researcher.ai.paper_mode`).
   - `compare_researchers_stream(researchers_data, lang, extra_instructions, model)` —
     multi-candidate comparison with field normalization (used by the WebUI comparison tab).
   - `extra_instructions` is appended as `【評価の観点・追加指示】` to the prompt for

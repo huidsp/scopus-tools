@@ -1,5 +1,3 @@
-from .api import ScopusClient
-from .core import compute_indices, summarize_papers
-from .ai_engine import estimate_expertise
+"""scopus_tools package."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

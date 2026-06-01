@@ -17,6 +17,7 @@ KEY_REQUIREMENTS = {
     "search":        ["SCOPUS_API_KEY"],
     "stats":         ["SCOPUS_API_KEY"],
     "summary":       ["SCOPUS_API_KEY"],
+    "papers":        ["SCOPUS_API_KEY"],
     "batch":         ["SCOPUS_API_KEY"],
     "analyze":       ["SCOPUS_API_KEY"],
     "eval":          ["SCOPUS_API_KEY"],
@@ -167,6 +168,17 @@ def main():
     sum_p.add_argument("--output", default=None,
                        help="Write to file path instead of stdout")
 
+    # 3b. papers (指定年範囲の論文一覧を取得)
+    papers_p = subparsers.add_parser("papers", help="List papers published in a given year range")
+    papers_p.add_argument("ids", nargs="?", help="Scopus IDs (comma separated)")
+    papers_p.add_argument("--input", default=None,
+                          help="Input CSV with 'Scopus ID' column (alternative to positional IDs)")
+    papers_p.add_argument("--years", default=None, help=YEAR_RANGE_HELP + " (default: last 5 years)")
+    papers_p.add_argument("--format", choices=["text", "json", "csv"], default="text",
+                          help="Output format (default: text)")
+    papers_p.add_argument("--output", default=None,
+                          help="Write to file path instead of stdout (required for --format csv)")
+
     # 4. batch (旧 scopus_batch_summary.py)
     batch_p = subparsers.add_parser("batch", help="Batch generate summary CSV for multiple authors")
     batch_p.add_argument("--input", required=True, help="Input CSV")
@@ -201,6 +213,11 @@ def main():
                         help="Write to file path instead of stdout")
     eval_p.add_argument("--model", default=llm.DEFAULT_MODEL, choices=llm.SUPPORTED_MODELS,
                         help=f"AI model (default: {llm.DEFAULT_MODEL})")
+    eval_p.add_argument("--paper-mode", dest="paper_mode",
+                        choices=["first_author", "period_full"], default="first_author",
+                        help="How paper details are fed to the AI: "
+                             "'first_author' = top-10 cited papers with author position (default); "
+                             "'period_full' = all in-range papers with author position")
 
     # 7. kaken-search (科研費 KAKEN: 研究者検索)
     ks_p = subparsers.add_parser("kaken-search", help="Search KAKEN researcher by name or number")
@@ -302,6 +319,45 @@ def main():
                     utils.print_report_text(first, last, s_ids, report, papers, year_range=year_range)
             _emit_text(_render_summary, args.output)
 
+    elif args.command == "papers":
+        if args.format == "csv" and not args.output:
+            parser.error("papers: --format csv requires --output")
+        client = api.ScopusClient()
+        targets = _collect_targets(args, parser)
+        year_range = _parse_year_range(args.years, parser, announce=args.years is None)
+        start_y, end_y = year_range
+        query_extra = f"PUBYEAR > {start_y - 1} AND PUBYEAR < {end_y + 1}"
+        is_batch = args.input is not None
+        results = []
+        for idx, (s_ids, label) in enumerate(targets, start=1):
+            if is_batch:
+                utils.progress(f"[{idx}/{len(targets)}] processing: {label or s_ids[0]}")
+            papers = client.search_papers(s_ids, query_extra=query_extra)
+            first, last = client.get_author_profile(s_ids[0])
+            results.append((s_ids, first, last, papers))
+        if is_batch:
+            utils.progress_done()
+
+        if args.format == "json":
+            items = [{
+                "scopus_ids": s_ids,
+                "author": {"first": first, "last": last},
+                "year_range": list(year_range),
+                "paper_count": len(papers),
+                "papers": papers,
+            } for (s_ids, first, last, papers) in results]
+            payload = items if is_batch else items[0]
+            _emit_json(payload, args.output)
+        elif args.format == "csv":
+            utils.save_papers_csv(results, args.output)
+        else:
+            def _render_papers():
+                for i, (s_ids, first, last, papers) in enumerate(results):
+                    if i > 0:
+                        print()
+                    utils.print_papers_list(first, last, s_ids, papers, year_range)
+            _emit_text(_render_papers, args.output)
+
     elif args.command == "batch":
         client = api.ScopusClient()
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
@@ -351,6 +407,7 @@ def main():
                     grants.extend(kaken_client.get_grants_by_researcher_id(kid, lang=args.lang))
             evaluation = ai_engine.evaluate_achievements(
                 papers, report, lang=args.lang, grants=grants, model=args.model,
+                paper_list_mode=args.paper_mode, year_range=year_range,
             )
             results.append((s_ids, first, last, report, resolved_kaken_ids, grants, evaluation))
         if is_batch:
