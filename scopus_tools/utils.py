@@ -33,6 +33,21 @@ def format_author_position(p):
     return s
 
 
+def format_wos_indexes(p):
+    """論文に付与された WoS 収録インデックスの表示文字列を返す。
+
+    `wos_indexes`(リスト)があれば '[SCIE][SSCI]' 形式、空なら '[未収録]'。
+    旧 `is_scie`(bool)のみの注釈には '[SCIE]'/'[非SCIE]' で後方互換。
+    注釈が無ければ空文字列。
+    """
+    if "wos_indexes" in p:
+        idx = p.get("wos_indexes") or []
+        return "".join(f"[{x}]" for x in idx) if idx else "[未収録]"
+    if "is_scie" in p:
+        return "[SCIE]" if p.get("is_scie") else "[非SCIE]"
+    return ""
+
+
 def setup_logging(level=logging.INFO):
     logging.basicConfig(
         level=level,
@@ -121,6 +136,8 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
     print(f"  総論文数          : {report['total_count']}")
     print(f"  総引用回数        : {report['total_citations']}")
     print(f"  筆頭著者論文数    : {report['total_first_author']}")
+    if report.get("has_scie_data"):
+        print(f"  SCI(SCIE)論文数   : {report['total_scie']}（うち筆頭著者 {report['total_scie_first_author']}）")
     recent_start, recent_end = resolve_year_range(
         year_range=year_range,
         recent_years=recent_years,
@@ -130,6 +147,8 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
     print(f"  論文数            : {report['recent_count']}")
     print(f"  総引用回数        : {report['recent_citations']}")
     print(f"  筆頭著者論文数    : {report['recent_first_author']}")
+    if report.get("has_scie_data"):
+        print(f"  SCI(SCIE)論文数   : {report['recent_scie']}（うち筆頭著者 {report['recent_scie_first_author']}）")
     print(_section("引用指標"))
     print(f"  H-index: {report['h_index']}")
     print(f"  G-index: {report['g_index']}")
@@ -144,7 +163,9 @@ def print_report_text(first, last, s_ids, report, papers, recent_years=5, year_r
             print(f"     著者順位  : {pos}")
         if p.get("journal"):
             agg = f" [{p['aggregation_type']}]" if p.get("aggregation_type") else ""
-            print(f"     ジャーナル: {p['journal']}{agg}")
+            wos = format_wos_indexes(p)
+            wos = f" {wos}" if wos else ""
+            print(f"     ジャーナル: {p['journal']}{agg}{wos}")
         biblio = []
         if p.get("volume"):  biblio.append(f"Vol.{p['volume']}")
         if p.get("issue"):   biblio.append(f"No.{p['issue']}")
@@ -182,7 +203,9 @@ def print_papers_list(first, last, s_ids, papers, year_range, header=True):
             print(f"     著者順位  : {pos}")
         if p.get("journal"):
             agg = f" [{p['aggregation_type']}]" if p.get("aggregation_type") else ""
-            print(f"     ジャーナル: {p['journal']}{agg}")
+            wos = format_wos_indexes(p)
+            wos = f" {wos}" if wos else ""
+            print(f"     ジャーナル: {p['journal']}{agg}{wos}")
         biblio = []
         if p.get("volume"):  biblio.append(f"Vol.{p['volume']}")
         if p.get("issue"):   biblio.append(f"No.{p['issue']}")
@@ -203,24 +226,30 @@ def save_papers_csv(rows, output_path):
     rows は (s_ids, first, last, papers) のリスト。複数著者ぶんを 1 ファイルに縦結合し、
     どの著者の論文かを Name / Scopus IDs 列で識別できるようにする。
     """
+    # WoS インデックス注釈(--scie-list 指定時のみ各論文に wos_indexes が付く)があれば列を出す。
+    has_wos = any("wos_indexes" in p for _, _, _, papers in rows for p in papers)
     fieldnames = [
         "Name", "Scopus IDs", "Year", "Title", "Authors", "Journal",
-        "Volume", "Issue", "Pages", "Type", "Citations",
+        "ISSN", "eISSN", "Volume", "Issue", "Pages", "Type", "Citations",
         "Author Position", "Author Count", "First Author", "EID",
     ]
+    if has_wos:
+        fieldnames.append("WoS Index")
     out = []
     for s_ids, first, last, papers in rows:
         name = f"{first} {last}".strip()
         ids = ", ".join(s_ids)
         ordered = sorted(papers, key=lambda x: (x.get("year", 0), x.get("citations", 0)), reverse=True)
         for p in ordered:
-            out.append({
+            row = {
                 "Name": name,
                 "Scopus IDs": ids,
                 "Year": p.get("year", ""),
                 "Title": p.get("title", ""),
                 "Authors": p.get("authors", ""),
                 "Journal": p.get("journal", ""),
+                "ISSN": p.get("issn", ""),
+                "eISSN": p.get("eissn", ""),
                 "Volume": p.get("volume", ""),
                 "Issue": p.get("issue", ""),
                 "Pages": p.get("pages", ""),
@@ -230,7 +259,10 @@ def save_papers_csv(rows, output_path):
                 "Author Count": p.get("author_count", ""),
                 "First Author": "Yes" if p.get("is_first_author") else "",
                 "EID": p.get("eid", ""),
-            })
+            }
+            if has_wos:
+                row["WoS Index"] = "|".join(p.get("wos_indexes") or [])
+            out.append(row)
     df = pd.DataFrame(out, columns=fieldnames)
     df.to_csv(output_path, index=False, encoding="utf-8-sig")
 

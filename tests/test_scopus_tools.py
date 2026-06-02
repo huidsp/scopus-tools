@@ -100,6 +100,37 @@ class TestSummarizePapers:
         assert result["total_count"] == 0
         assert result["total_citations"] == 0
         assert result["start_year"] is None
+        assert result["has_scie_data"] is False
+        assert result["total_scie"] == 0
+
+    def test_no_scie_annotation(self):
+        from scopus_tools.core import summarize_papers
+        result = summarize_papers(DUMMY_PAPERS)
+        # DUMMY_PAPERS は is_scie を持たないため SCIE 集計は無効・0。
+        assert result["has_scie_data"] is False
+        assert result["total_scie"] == 0
+        assert result["recent_scie"] == 0
+
+    def test_scie_counts(self):
+        from scopus_tools.core import summarize_papers
+        import datetime
+        cy = datetime.datetime.now().year
+        papers = [
+            # 評価期間内・SCIE・筆頭
+            {"title": "A", "year": cy - 1, "citations": 10, "is_scie": True, "is_first_author": True},
+            # 評価期間内・SCIE・非筆頭
+            {"title": "B", "year": cy - 1, "citations": 5, "is_scie": True, "is_first_author": False},
+            # 評価期間内・非SCIE・筆頭
+            {"title": "C", "year": cy - 1, "citations": 3, "is_scie": False, "is_first_author": True},
+            # 期間外・SCIE・筆頭
+            {"title": "D", "year": cy - 10, "citations": 2, "is_scie": True, "is_first_author": True},
+        ]
+        r = summarize_papers(papers, recent_years=5)
+        assert r["has_scie_data"] is True
+        assert r["total_scie"] == 3
+        assert r["total_scie_first_author"] == 2
+        assert r["recent_scie"] == 2
+        assert r["recent_scie_first_author"] == 1
 
 
 # ---------------------------------------------------------------------------

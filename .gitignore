@@ -16,6 +16,14 @@ env/
 # 環境変数
 .env
 
+# WoS 収録誌リスト(Clarivate Master Journal List のエクスポート。登録制データのため非コミット)
+# SCIE / SSCI / AHCI / ESCI などインデックス別 CSV
+*Citation Index*.csv
+*(SCIE).csv
+*(SSCI).csv
+*(AHCI).csv
+*(ESCI).csv
+
 # pytest
 .pytest_cache/
 .cache/

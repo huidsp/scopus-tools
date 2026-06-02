@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from dotenv import load_dotenv
-from scopus_tools import api, core, ai_engine, utils, kaken, linking, llm
+from scopus_tools import api, core, ai_engine, utils, kaken, linking, llm, scie
 
 
 # どのサブコマンドにどの環境変数が必須か。
@@ -167,6 +167,10 @@ def main():
                        help="Output format (default: text)")
     sum_p.add_argument("--output", default=None,
                        help="Write to file path instead of stdout")
+    sum_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
+                       help="One or more Web of Science journal lists (see `papers --scie-list`). "
+                            "When given, the summary adds SCI(SCIE) paper counts and their "
+                            "first-author counts for both the full and evaluation periods.")
 
     # 3b. papers (指定年範囲の論文一覧を取得)
     papers_p = subparsers.add_parser("papers", help="List papers published in a given year range")
@@ -178,6 +182,13 @@ def main():
                           help="Output format (default: text)")
     papers_p.add_argument("--output", default=None,
                           help="Write to file path instead of stdout (required for --format csv)")
+    papers_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
+                          help="One or more Web of Science journal lists (CSV with ISSN columns, or "
+                               "one ISSN per line). The index name is derived from each filename's "
+                               "parenthesized abbreviation, e.g. '... (SCIE).csv' -> SCIE. Each paper "
+                               "is annotated with the matching index names (SCIE/SSCI/AHCI/...).")
+    papers_p.add_argument("--scie-only", action="store_true",
+                          help="Keep only papers indexed in at least one given list (requires --scie-list)")
 
     # 4. batch (旧 scopus_batch_summary.py)
     batch_p = subparsers.add_parser("batch", help="Batch generate summary CSV for multiple authors")
@@ -218,6 +229,10 @@ def main():
                         help="How paper details are fed to the AI: "
                              "'first_author' = top-10 cited papers with author position (default); "
                              "'period_full' = all in-range papers with author position")
+    eval_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
+                        help="One or more Web of Science journal lists (see `papers --scie-list`). "
+                             "Index names are derived from filenames; per-index coverage counts are "
+                             "included in the AI evaluation prompt.")
 
     # 7. kaken-search (科研費 KAKEN: 研究者検索)
     ks_p = subparsers.add_parser("kaken-search", help="Search KAKEN researcher by name or number")
@@ -244,6 +259,11 @@ def main():
     webui_p.add_argument("--share", action="store_true", help="Create a Gradio public share link")
     webui_p.add_argument("--projects-dir", dest="projects_dir", default=None,
                          help="Directory to store project JSON files (default: ~/.scopus-tools/projects/)")
+    webui_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
+                         help="One or more Web of Science journal lists (see `papers --scie-list`). "
+                              "Papers fetched in the UI are annotated with their index names "
+                              "(SCIE/SSCI/...). If omitted, '*Citation Index*.csv' in the launch "
+                              "directory is auto-loaded.")
 
     args = parser.parse_args()
 
@@ -287,6 +307,7 @@ def main():
 
     elif args.command == "summary":
         client = api.ScopusClient()
+        index_sets = scie.load_index_sets(args.scie_list) if args.scie_list else None
         targets = _collect_targets(args, parser)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         is_batch = args.input is not None
@@ -295,6 +316,8 @@ def main():
             if is_batch:
                 utils.progress(f"[{idx}/{len(targets)}] processing: {label or s_ids[0]}")
             papers = client.search_papers(s_ids)
+            if index_sets is not None:
+                scie.annotate_papers_indexes(papers, index_sets)
             first, last = client.get_author_profile(s_ids[0])
             report = core.summarize_papers(papers, year_range=year_range)
             results.append((s_ids, first, last, report, papers))
@@ -322,7 +345,10 @@ def main():
     elif args.command == "papers":
         if args.format == "csv" and not args.output:
             parser.error("papers: --format csv requires --output")
+        if args.scie_only and not args.scie_list:
+            parser.error("papers: --scie-only requires --scie-list")
         client = api.ScopusClient()
+        index_sets = scie.load_index_sets(args.scie_list) if args.scie_list else None
         targets = _collect_targets(args, parser)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         start_y, end_y = year_range
@@ -333,6 +359,10 @@ def main():
             if is_batch:
                 utils.progress(f"[{idx}/{len(targets)}] processing: {label or s_ids[0]}")
             papers = client.search_papers(s_ids, query_extra=query_extra)
+            if index_sets is not None:
+                scie.annotate_papers_indexes(papers, index_sets)
+                if args.scie_only:
+                    papers = [p for p in papers if p.get("wos_indexes")]
             first, last = client.get_author_profile(s_ids[0])
             results.append((s_ids, first, last, papers))
         if is_batch:
@@ -370,6 +400,7 @@ def main():
 
     elif args.command == "eval":
         client = api.ScopusClient()
+        index_sets = scie.load_index_sets(args.scie_list) if args.scie_list else None
         targets = _collect_targets(args, parser)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         is_batch = args.input is not None
@@ -385,6 +416,8 @@ def main():
             if is_batch:
                 utils.progress(f"[{idx}/{len(targets)}] processing: {label or s_ids[0]}")
             papers = client.search_papers(s_ids)
+            if index_sets is not None:
+                scie.annotate_papers_indexes(papers, index_sets)
             first, last = client.get_author_profile(s_ids[0])
             report = core.summarize_papers(papers, year_range=year_range)
             grants = None
@@ -464,7 +497,7 @@ def main():
             )
         webui.launch(
             host=args.host, port=args.port, share=args.share,
-            projects_dir=args.projects_dir,
+            projects_dir=args.projects_dir, scie_list=args.scie_list,
         )
         return
 

@@ -32,6 +32,28 @@ logger = logging.getLogger(__name__)
 
 _KAKEN_ID_RE = re.compile(r"\b\d{8}\b")
 
+# WoS 収録インデックス(SCIE/SSCI/AHCI/ESCI)の {ラベル: ISSN集合}。
+# launch() 時に一度だけ読み込み、Scopus 取得時の論文注釈に使う。空なら注釈しない。
+_INDEX_SETS = {}
+
+
+def _load_index_sets(scie_list=None):
+    """WoS インデックス CSV を読み込んでモジュール変数 _INDEX_SETS にセットする。
+
+    scie_list が None のときはカレントディレクトリの `*Citation Index*.csv` を自動検出する
+    (ユーザがリポジトリ直下に置いた Clarivate エクスポートをそのまま使えるように)。
+    """
+    import glob
+    from scopus_tools import scie
+
+    global _INDEX_SETS
+    paths = list(scie_list) if scie_list else sorted(glob.glob("*Citation Index*.csv"))
+    _INDEX_SETS = scie.load_index_sets(paths) if paths else {}
+    if _INDEX_SETS:
+        logger.info("WoS index lists loaded: %s",
+                    ", ".join(f"{k}({len(v)})" for k, v in _INDEX_SETS.items()))
+    return _INDEX_SETS
+
 
 # ---------------------------------------------------------------------------
 # Clipboard / Download JS
@@ -206,6 +228,14 @@ def _env_banner():
         lines.append("ℹ️ `ANTHROPIC_API_KEY` 未設定 — `claude-*` モデルは選べません。")
     if not kaken_ok:
         lines.append("ℹ️ `KAKEN_APP_ID` が未設定です。KAKEN タブが使えません。")
+    if _INDEX_SETS:
+        idx = ", ".join(f"{k}({len(v)})" for k, v in _INDEX_SETS.items())
+        lines.append(f"📚 WoS 収録インデックス判定: {idx} を読み込み済み(論文に収録区分を付与します)")
+    else:
+        lines.append(
+            "ℹ️ WoS 収録インデックス CSV は未読み込みです。`webui --scie-list ...` で渡すか、"
+            "起動ディレクトリに `*Citation Index*.csv` を置くと SCIE/SSCI 等を判定します。"
+        )
     return "\n".join(lines) or (
         "✅ Scopus / OpenAI / Anthropic / KAKEN の API キーが揃っています。"
     )
@@ -289,6 +319,9 @@ def _scopus_run(store, project_name, researcher_name, scopus_ids, year_start, ye
     try:
         client = api.ScopusClient()
         papers = client.search_papers(scopus_ids)
+        if _INDEX_SETS:
+            from scopus_tools import scie
+            scie.annotate_papers_indexes(papers, _INDEX_SETS)
         first, last = client.get_author_profile(scopus_ids[0])
     except Exception as e:  # noqa: BLE001
         logger.exception("Scopus fetch failed")
@@ -516,8 +549,8 @@ def _ai_run(store, project_name, researcher_name, scopus_state, kaken_state, lan
 _COMPARE_COLUMNS = [
     "研究者", "推定分野", "AI評価",
     "研究歴", "開始年",
-    "総論文", "総被引用", "H", "G",
-    "評価期間", "期間内論文", "期間内被引用", "期間内筆頭",
+    "総論文", "総被引用", "総筆頭", "総SCI(筆頭)", "H", "G",
+    "評価期間", "期間内論文", "期間内被引用", "期間内筆頭", "期間内SCI(筆頭)",
     "KAKEN件", "KAKEN代表", "KAKEN総額",
 ]
 
@@ -562,6 +595,12 @@ def _row_for_researcher(researcher):
         except (TypeError, ValueError):
             return "—"
 
+    def _fmt_scie(count_key, first_key):
+        """SCI(SCIE)数(うち筆頭)を 'n (m)' 形式に。注釈が無ければ '—'。"""
+        if not report.get("has_scie_data"):
+            return "—"
+        return f"{report.get(count_key, 0)} ({report.get(first_key, 0)})"
+
     return [
         str(name),
         str(field_name),
@@ -570,12 +609,15 @@ def _row_for_researcher(researcher):
         _fmt_int(report.get("start_year")),
         _fmt_int(report.get("total_count")),
         _fmt_int(report.get("total_citations")),
+        _fmt_int(report.get("total_first_author")),
+        _fmt_scie("total_scie", "total_scie_first_author"),
         _fmt_int(report.get("h_index")),
         _fmt_int(report.get("g_index")),
         year_str,
         _fmt_int(report.get("recent_count")),
         _fmt_int(report.get("recent_citations")),
         _fmt_int(report.get("recent_first_author")),
+        _fmt_scie("recent_scie", "recent_scie_first_author"),
         str(len(grants)) if has_kaken_section else "—",
         str(pi_count) if has_kaken_section else "—",
         _fmt_yen(total_cost) if grants else "—",
@@ -1561,10 +1603,11 @@ def build_app(store=None):
     return app
 
 
-def launch(host="127.0.0.1", port=7860, share=False, projects_dir=None):
+def launch(host="127.0.0.1", port=7860, share=False, projects_dir=None, scie_list=None):
     from dotenv import load_dotenv
 
     load_dotenv()
+    _load_index_sets(scie_list)
     store = ProjectStore(projects_dir) if projects_dir else ProjectStore()
     logger.info("Projects directory: %s", store.dir_path)
     app = build_app(store)

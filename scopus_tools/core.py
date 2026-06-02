@@ -68,6 +68,11 @@ def summarize_papers(papers, recent_years=5, year_range=None):
             "recent_first_author": 0,
             "research_years": 0,
             "start_year": None,
+            "has_scie_data": False,
+            "total_scie": 0,
+            "total_scie_first_author": 0,
+            "recent_scie": 0,
+            "recent_scie_first_author": 0,
         }
 
     cites = [p["citations"] for p in papers]
@@ -82,6 +87,13 @@ def summarize_papers(papers, recent_years=5, year_range=None):
     total_first = sum(1 for p in papers if p.get("is_first_author"))
     recent_first = sum(1 for p in recent_papers if p.get("is_first_author"))
 
+    # SCIE 集計(scie.annotate_papers* で is_scie が付与されている場合のみ意味を持つ)。
+    has_scie_data = any("is_scie" in p for p in papers)
+    total_scie = sum(1 for p in papers if p.get("is_scie"))
+    total_scie_first = sum(1 for p in papers if p.get("is_scie") and p.get("is_first_author"))
+    recent_scie = sum(1 for p in recent_papers if p.get("is_scie"))
+    recent_scie_first = sum(1 for p in recent_papers if p.get("is_scie") and p.get("is_first_author"))
+
     return {
         "has_data": True,
         "total_count": len(papers),
@@ -94,4 +106,9 @@ def summarize_papers(papers, recent_years=5, year_range=None):
         "recent_first_author": recent_first,
         "research_years": research_years,
         "start_year": start_year,
+        "has_scie_data": has_scie_data,
+        "total_scie": total_scie,
+        "total_scie_first_author": total_scie_first,
+        "recent_scie": recent_scie,
+        "recent_scie_first_author": recent_scie_first,
     }

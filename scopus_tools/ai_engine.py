@@ -170,7 +170,8 @@ def _build_eval_prompt(papers, report, lang, grants, field_ctx, extra_instructio
     def _paper_line(p):
         pos = format_author_position(p)
         pos_str = f", 著者順位: {pos}" if pos else ""
-        return (f"  - {p['title']} [{p.get('journal') or '不明'}] "
+        idx_str = "".join(f" [{x}]" for x in (p.get("wos_indexes") or []))
+        return (f"  - {p['title']} [{p.get('journal') or '不明'}]{idx_str} "
                 f"(citations: {p['citations']}, year: {p['year']}{pos_str})")
 
     if paper_list_mode == "period_full":
@@ -190,6 +191,32 @@ def _build_eval_prompt(papers, report, lang, grants, field_ctx, extra_instructio
         f"  - {j['journal']} ({j['type'] or '種別不明'}): {j['count']} 件, 総被引用 {j['citations']} 件"
         for j in journal_summary[:15]
     )
+
+    # WoS インデックス注釈(papers に wos_indexes がある＝eval --scie-list 指定時)があれば
+    # インデックス別の収録状況を提示。
+    scie_section = ""
+    if any("wos_indexes" in p for p in papers):
+        recent = ([p for p in papers if year_range[0] <= p.get("year", 0) <= year_range[1]]
+                  if year_range else list(papers))
+        labels = sorted({lbl for p in papers for lbl in (p.get("wos_indexes") or [])})
+        if labels:
+            count_lines = "\n".join(
+                f"  - {lbl}: 全 {sum(1 for p in papers if lbl in (p.get('wos_indexes') or []))} 件"
+                f" / 評価期間内 {sum(1 for p in recent if lbl in (p.get('wos_indexes') or []))} 件"
+                for lbl in labels
+            )
+        else:
+            count_lines = "  - 該当する収録インデックスなし"
+        any_total = sum(1 for p in papers if p.get("wos_indexes"))
+        any_recent = sum(1 for p in recent if p.get("wos_indexes"))
+        scie_section = f"""
+【Web of Science 収録インデックス状況（SCIE/SSCI/AHCI/ESCI 等）】
+- いずれかのインデックスに収録された論文: 全 {any_total} / {len(papers)} 件、評価期間内 {any_recent} / {len(recent)} 件
+- インデックス別:
+{count_lines}
+※ 掲載誌の ISSN を Clarivate Master Journal List（インデックス別収録誌リスト）と突合して判定
+  （会議録・書籍シリーズ等は対象外）。掲載誌の質を評価する際の客観材料として考慮してください。
+"""
 
     field_section = ""
     if field_ctx:
@@ -264,7 +291,7 @@ def _build_eval_prompt(papers, report, lang, grants, field_ctx, extra_instructio
 
 【掲載ジャーナル一覧（被引用数順、上位15誌）】
 {journal_lines}
-
+{scie_section}
 【{paper_section_title}】
 {top_titles}
 {kaken_section}

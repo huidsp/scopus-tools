@@ -55,12 +55,18 @@ CLI subcommands (see `scopus_tools/cli.py`):
 - `papers` — list papers published in a given `--years` range; positional IDs or `--input` CSV,
   `--format text|json|csv` (csv requires `--output`). Each paper carries `author_position` /
   `author_count` (shown as `2/3`, `1/4 (first)`) computed in `api.search_papers`.
+  `--scie-list CSV [CSV ...]` annotates each paper with the matching Web of Science index
+  names (SCIE/SSCI/AHCI/...) by ISSN match (see `scie`); `--scie-only` then keeps only papers
+  indexed in at least one given list.
 - `batch` — CSV-in / CSV-out summary across many authors.
 - `analyze` — AI-based expertise estimation from paper titles; takes `--model`.
 - `eval` — AI-based comprehensive field-normalized evaluation; supports `--kaken-id`,
   `--kaken-auto`, `--no-kaken`, `--input` CSV mode, `--format json`, `--model`.
+  `--scie-list CSV [CSV ...]` adds per-index WoS coverage counts (total + in-period) to the
+  evaluation prompt.
 - `kaken-search` / `kaken-summary` — KAKEN researcher lookup and grant summary.
-- `webui` — launches the Gradio WebUI on `127.0.0.1:7860`; supports `--projects-dir`.
+- `webui` — launches the Gradio WebUI on `127.0.0.1:7860`; supports `--projects-dir` and
+  `--scie-list CSV [CSV ...]` (auto-detects `*Citation Index*.csv` in the launch dir if omitted).
 
 Year-range arguments accept `2021-2025`, `2021,2025`, `2021:2025`, or `[2021,2025]`
 (parsed by `_parse_year_range` in `cli.py`). When omitted, defaults to the **previous year inclusive,
@@ -97,6 +103,23 @@ Two control flows:
 - **`linking`** — Scopus author → KAKEN researcher number matching by name. Used by the CLI's
   `eval --kaken-auto` flow. The WebUI does its own selection through the KAKEN tab and
   doesn't rely on this module.
+
+- **`scie`** — Web of Science indexing check (SCIE/SSCI/AHCI/ESCI). Scopus has no WoS-index
+  flag (that's a Clarivate/Web of Science concept), so this matches a paper's `issn`/`eissn`
+  (added by `api.search_papers`) against **user-supplied** per-index journal lists.
+  - `load_scie_issn_set(path)` — reads a CSV (auto-detects columns whose name contains `issn`;
+    falls back to all columns / column names for headerless files) or a one-ISSN-per-line text
+    file, returns a set of `normalize_issn`'d ISSNs.
+  - `normalize_issn(v)` strips hyphens/spaces, uppercases, requires 8 chars (else `None`).
+  - `derive_index_label(path)` — index name from the filename's parenthesized abbreviation
+    (`... (SCIE).csv` → `SCIE`), else the filename stem.
+  - `load_index_sets(paths)` — `{index_label: issn_set}` from several lists (same label merges).
+  - `annotate_papers_indexes(papers, index_sets)` sets `wos_indexes` (sorted label list) and
+    `is_scie` (`"SCIE" in wos_indexes`) in-place; returns the count of papers in ≥1 index.
+  - `annotate_papers(papers, issn_set)` — legacy single-set helper setting just `is_scie`.
+  - Lists are登録制 (Clarivate Master Journal List), one CSV per index, not auto-downloadable;
+    pass them via `--scie-list`. Each index is a separate download — a single CSV has no
+    per-row index label. The data files are gitignored.
 
 - **`llm`** — provider abstraction over OpenAI and Anthropic.
   - `SUPPORTED_MODELS = ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4"]`,
@@ -156,6 +179,11 @@ Two control flows:
   - Copy / Export buttons use client-side JS (`_COPY_JS`, `_download_js`) — no temp files on
     the server (avoids a `gr.File` schema bug in `gradio_client` 1.3.x).
   - Streaming AI evaluation is a `yield from` generator hooked to `ai_run_btn.click`.
+  - WoS index lists are loaded once at `launch(scie_list=...)` into the module global
+    `_INDEX_SETS` (via `_load_index_sets`; auto-detects `*Citation Index*.csv` in the launch
+    dir when no `--scie-list` is given). `_scopus_run` annotates fetched papers with
+    `wos_indexes`, so the papers list (`print_papers_list`) and AI eval (`_build_eval_prompt`)
+    surface SCIE/SSCI/... automatically. The env banner reports which indexes were loaded.
 
 ## Tests
 

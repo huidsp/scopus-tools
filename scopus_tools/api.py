@@ -129,6 +129,8 @@ class ScopusClient:
                     "year": int(e.get("prism:coverDate", "0000")[:4]),
                     "citations": int(e.get("citedby-count", 0)),
                     "journal": e.get("prism:publicationName"),
+                    "issn": e.get("prism:issn", ""),
+                    "eissn": e.get("prism:eIssn", ""),
                     "volume": e.get("prism:volume", ""),
                     "issue": e.get("prism:issueIdentifier", ""),
                     "pages": e.get("prism:pageRange", ""),
