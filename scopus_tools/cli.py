@@ -262,8 +262,12 @@ def main():
     webui_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
                          help="One or more Web of Science journal lists (see `papers --scie-list`). "
                               "Papers fetched in the UI are annotated with their index names "
-                              "(SCIE/SSCI/...). If omitted, '*Citation Index*.csv' in the launch "
-                              "directory is auto-loaded.")
+                              "(SCIE/SSCI/...).")
+    webui_p.add_argument("--scie-dir", dest="scie_dir", default=None, metavar="DIR",
+                         help="Directory holding the Web of Science index CSVs; every '*.csv' in it "
+                              "is loaded. Used by the Docker image (mount to /data/index). If neither "
+                              "--scie-list nor --scie-dir is given, '*Citation Index*.csv' and "
+                              "'index/*.csv' in the launch directory are auto-loaded.")
 
     args = parser.parse_args()
 
@@ -498,6 +502,7 @@ def main():
         webui.launch(
             host=args.host, port=args.port, share=args.share,
             projects_dir=args.projects_dir, scie_list=args.scie_list,
+            scie_dir=args.scie_dir,
         )
         return
 

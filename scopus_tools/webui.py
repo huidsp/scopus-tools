@@ -37,21 +37,33 @@ _KAKEN_ID_RE = re.compile(r"\b\d{8}\b")
 _INDEX_SETS = {}
 
 
-def _load_index_sets(scie_list=None):
+def _load_index_sets(scie_list=None, scie_dir=None):
     """WoS インデックス CSV を読み込んでモジュール変数 _INDEX_SETS にセットする。
 
-    scie_list が None のときはカレントディレクトリの `*Citation Index*.csv` を自動検出する
-    (ユーザがリポジトリ直下に置いた Clarivate エクスポートをそのまま使えるように)。
+    優先順位:
+      1. scie_list … 明示されたファイルパス群をそのまま使う。
+      2. scie_dir  … そのディレクトリ内の `*.csv` をすべて読む(index 専用フォルダ想定。
+                      Docker では `/data/index` をマウントする運用)。
+      3. 自動検出 … カレントの `*Citation Index*.csv` と `index/*.csv`。
     """
     import glob
     from scopus_tools import scie
 
     global _INDEX_SETS
-    paths = list(scie_list) if scie_list else sorted(glob.glob("*Citation Index*.csv"))
+    if scie_list:
+        paths = list(scie_list)
+    elif scie_dir:
+        paths = sorted(glob.glob(os.path.join(scie_dir, "*.csv")))
+    else:
+        paths = sorted(glob.glob("*Citation Index*.csv")) + sorted(glob.glob(os.path.join("index", "*.csv")))
+    # 重複パスを順序維持で除去
+    paths = list(dict.fromkeys(paths))
     _INDEX_SETS = scie.load_index_sets(paths) if paths else {}
     if _INDEX_SETS:
         logger.info("WoS index lists loaded: %s",
                     ", ".join(f"{k}({len(v)})" for k, v in _INDEX_SETS.items()))
+    else:
+        logger.info("No WoS index CSV found (scie_dir=%s)", scie_dir)
     return _INDEX_SETS
 
 
@@ -1603,11 +1615,12 @@ def build_app(store=None):
     return app
 
 
-def launch(host="127.0.0.1", port=7860, share=False, projects_dir=None, scie_list=None):
+def launch(host="127.0.0.1", port=7860, share=False, projects_dir=None,
+           scie_list=None, scie_dir=None):
     from dotenv import load_dotenv
 
     load_dotenv()
-    _load_index_sets(scie_list)
+    _load_index_sets(scie_list, scie_dir)
     store = ProjectStore(projects_dir) if projects_dir else ProjectStore()
     logger.info("Projects directory: %s", store.dir_path)
     app = build_app(store)

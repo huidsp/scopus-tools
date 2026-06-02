@@ -32,15 +32,16 @@ RUN pip install --upgrade pip \
 # ---- Runtime -------------------------------------------------------------
 # 非 root ユーザで実行
 RUN useradd --create-home --uid 1000 appuser \
- && mkdir -p /data/projects \
+ && mkdir -p /data/projects /data/index \
  && chown -R appuser:appuser /data
 USER appuser
 
 # WebUI のデフォルトポート
 EXPOSE 7860
 
-# プロジェクト JSON を永続化するためのボリューム
-VOLUME ["/data/projects"]
+# プロジェクト JSON の永続化と, WoS インデックス CSV(SCIE/SSCI/AHCI/ESCI)用のボリューム.
+# index 側は `./index:/data/index` をマウントして CSV を置く運用.
+VOLUME ["/data/projects", "/data/index"]
 
 # tini で PID 1 を引き取り, シグナルを正しく伝搬させる.
 ENTRYPOINT ["/usr/bin/tini", "--", "scopus-tools"]
@@ -48,4 +49,5 @@ ENTRYPOINT ["/usr/bin/tini", "--", "scopus-tools"]
 # デフォルトは WebUI 起動. コンテナ外からアクセスできるよう 0.0.0.0 にバインド.
 # CLI を使いたいときは `docker run ... search --name "..."` のように上書き可能.
 CMD ["webui", "--host", "0.0.0.0", "--port", "7860", \
-     "--projects-dir", "/data/projects"]
+     "--projects-dir", "/data/projects", \
+     "--scie-dir", "/data/index"]

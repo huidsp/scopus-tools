@@ -65,8 +65,10 @@ CLI subcommands (see `scopus_tools/cli.py`):
   `--scie-list CSV [CSV ...]` adds per-index WoS coverage counts (total + in-period) to the
   evaluation prompt.
 - `kaken-search` / `kaken-summary` — KAKEN researcher lookup and grant summary.
-- `webui` — launches the Gradio WebUI on `127.0.0.1:7860`; supports `--projects-dir` and
-  `--scie-list CSV [CSV ...]` (auto-detects `*Citation Index*.csv` in the launch dir if omitted).
+- `webui` — launches the Gradio WebUI on `127.0.0.1:7860`; supports `--projects-dir`,
+  `--scie-list CSV [CSV ...]`, and `--scie-dir DIR` (loads every `*.csv` in DIR). With neither
+  flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir. The Docker
+  image mounts the index CSVs at `/data/index` (`docker-compose.yml` maps `./index:/data/index`).
 
 Year-range arguments accept `2021-2025`, `2021,2025`, `2021:2025`, or `[2021,2025]`
 (parsed by `_parse_year_range` in `cli.py`). When omitted, defaults to the **previous year inclusive,
@@ -179,9 +181,10 @@ Two control flows:
   - Copy / Export buttons use client-side JS (`_COPY_JS`, `_download_js`) — no temp files on
     the server (avoids a `gr.File` schema bug in `gradio_client` 1.3.x).
   - Streaming AI evaluation is a `yield from` generator hooked to `ai_run_btn.click`.
-  - WoS index lists are loaded once at `launch(scie_list=...)` into the module global
-    `_INDEX_SETS` (via `_load_index_sets`; auto-detects `*Citation Index*.csv` in the launch
-    dir when no `--scie-list` is given). `_scopus_run` annotates fetched papers with
+  - WoS index lists are loaded once at `launch(scie_list=..., scie_dir=...)` into the module
+    global `_INDEX_SETS` (via `_load_index_sets`; precedence: explicit `scie_list` → all `*.csv`
+    in `scie_dir` → auto-detect `*Citation Index*.csv` + `index/*.csv` in the launch dir).
+    Docker passes `--scie-dir /data/index`. `_scopus_run` annotates fetched papers with
     `wos_indexes`, so the papers list (`print_papers_list`) and AI eval (`_build_eval_prompt`)
     surface SCIE/SSCI/... automatically. The env banner reports which indexes were loaded.
 
