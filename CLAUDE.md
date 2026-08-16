@@ -4,33 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`scopus_tools` is a Python toolkit that combines the Elsevier Scopus REST API, the KAKEN (科研費) API,
-and LLMs (OpenAI and Anthropic Claude) to fetch researcher data, compute bibliometric indicators
-(H-index, G-index, citations, first-author counts), pull KAKEN grant histories, and produce
-field-normalized AI evaluations. It ships:
+`scopus_tools` is a Python toolkit over the Elsevier Scopus REST API and the KAKEN (科研費) API.
+It fetches researcher data, computes bibliometric indicators (H-index, G-index, citations,
+first-author counts), pulls KAKEN grant histories, and annotates papers with their
+Web of Science index coverage. It ships two frontends:
 
-- A CLI (`scopus-tools`) with 10 subcommands.
-- A Gradio WebUI (`scopus-tools webui`) with a project-based hierarchical workspace
-  (project → multiple researchers → Scopus / KAKEN / AI / comparison panels) that
-  persists everything to JSON files.
+- A CLI (`scopus-tools`) with 8 subcommands.
+- An MCP server (`scopus-tools mcp`, stdio) exposing data retrieval plus project persistence.
+
+**This package never calls an LLM over an API.** Evaluation, field inference, and
+researcher comparison are the MCP host model's job — it calls these tools iteratively and
+reasons itself. A previous version had `ai_engine` / `llm` modules and `analyze` / `eval`
+subcommands backed by the OpenAI and Anthropic SDKs; they were deliberately removed in
+v0.4.0, along with the Gradio WebUI. **Do not reintroduce them** — no `openai` /
+`anthropic` dependency, no "let the tool call a model for you" feature. A test in
+`tests/test_mcp_server.py` (`test_package_has_no_llm_api_modules`) guards this.
 
 The CLI is primarily Japanese-facing (report text and many log messages), but identifiers
 and CLI flag names stay in English.
 
 ## Environment
 
-- Python ≥ 3.9. Main dependencies: `requests`, `pandas`, `python-dotenv`, `openai`, `anthropic`.
-  Optional extras: `[ui]` → `gradio>=4.0`; `[dev]` → `pytest`.
-- A `.env` at the repo root is loaded by `cli.main` via `load_dotenv()`. Keys:
+- Python ≥ 3.12 (`requires-python` in `pyproject.toml`). Dependencies are only `requests`
+  and `python-dotenv`. Optional extras: `[dev]` → `pytest`; `[mcp]` → `mcp>=1.2`.
+  **pandas was removed in v0.6.0** — it and numpy were 104MB of a 174MB install for what
+  amounted to four CSV helpers. CSV I/O is stdlib `csv` now (16MB CLI / 54MB with MCP).
+  Don't reintroduce pandas for CSV work.
+- A `.env` at the repo root is loaded by `cli.main` via `load_dotenv()`. Only two keys:
   - `SCOPUS_API_KEY` — required for any Scopus-touching command.
-  - `OPENAI_API_KEY` — required when the chosen model is `gpt-*`.
-  - `ANTHROPIC_API_KEY` — required when the chosen model is `claude-*` (the default).
   - `KAKEN_APP_ID` — required for KAKEN-touching commands.
 - Local dev install:
 
   ```bash
-  python3 -m venv .venv && source .venv/bin/activate
-  pip install -e ".[ui,dev]"
+  python3.12 -m venv .venv && source .venv/bin/activate
+  pip install -e ".[mcp,dev]"
   ```
 
 ## Common commands
@@ -49,7 +56,9 @@ python -m scopus_tools.cli <subcommand> ...
 
 CLI subcommands (see `scopus_tools/cli.py`):
 
-- `search` — Scopus ID lookup by name (single `--name` or batch `--input/--output` CSV).
+- `search` — Scopus ID lookup. `--first/--last` is one request; `--name` splits on whitespace
+  assuming *given surname*; `--try-both` restores the old two-request behavior. Batch CSV takes
+  `First Name`/`Last Name` columns, else falls back to splitting `Name`.
 - `stats` — paper / citation counts per year range; requires `--years`.
 - `summary` — human-readable per-author report; supports `--input` CSV mode and `--format json`.
 - `papers` — list papers published in a given `--years` range; positional IDs or `--input` CSV,
@@ -59,19 +68,22 @@ CLI subcommands (see `scopus_tools/cli.py`):
   names (SCIE/SSCI/AHCI/...) by ISSN match (see `scie`); `--scie-only` then keeps only papers
   indexed in at least one given list.
 - `batch` — CSV-in / CSV-out summary across many authors.
-- `analyze` — AI-based expertise estimation from paper titles; takes `--model`.
-- `eval` — AI-based comprehensive field-normalized evaluation; supports `--kaken-id`,
-  `--kaken-auto`, `--no-kaken`, `--input` CSV mode, `--format json`, `--model`.
-  `--scie-list CSV [CSV ...]` adds per-index WoS coverage counts (total + in-period) to the
-  evaluation prompt.
 - `kaken-search` / `kaken-summary` — KAKEN researcher lookup and grant summary.
-- `webui` — launches the Gradio WebUI on `127.0.0.1:7860`; supports `--projects-dir`,
+- `mcp-setup` — registers this tool with Claude Code (`claude mcp add`) or Claude Desktop.
+  Touches no network. See the `mcp_setup` module note below.
+- `cache` — `stats` / `list` / `clear` / `vacuum` / `path`. Touches no network.
+- `mcp` — runs the MCP server over stdio (see `mcp_server`); takes `--projects-dir`,
   `--scie-list CSV [CSV ...]`, and `--scie-dir DIR` (loads every `*.csv` in DIR). With neither
-  flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir. The Docker
-  image mounts the index CSVs at `/data/index` (`docker-compose.yml` maps `./index:/data/index`).
+  scie flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir. The
+  Docker image mounts the index CSVs at `/data/index`. Forces logging to stderr before starting.
+
+All subcommands also accept the global cache/network flags: `--refresh`, `--offline`,
+`--no-cache`, `--cache-db PATH`, `--timeout SEC`, `--stale-days N`, and the repeatable
+`--stale-days-for API=N`.
 
 Year-range arguments accept `2021-2025`, `2021,2025`, `2021:2025`, or `[2021,2025]`
-(parsed by `_parse_year_range` in `cli.py`). When omitted, defaults to the **previous year inclusive,
+(parsed by `core.parse_year_range`; `cli._parse_year_range` wraps it to turn `ValueError`
+into `parser.error`). When omitted, defaults to the **previous year inclusive,
 last 5 years** via `core.default_eval_year_range()` (e.g., in 2026 → `(2021, 2025)`).
 
 ## Architecture
@@ -79,14 +91,73 @@ last 5 years** via `core.default_eval_year_range()` (e.g., in 2026 → `(2021, 2
 The codebase is intentionally flat — modules under `scopus_tools/`, each with a single responsibility.
 Two control flows:
 
-**CLI**: `cli.py` → `ScopusClient` / `KakenClient` / `ai_engine` → `core` (pure functions) → `utils` (presentation).
-**WebUI**: `webui.py` → `ProjectStore` (JSON persistence) + same backends → Gradio components.
+**CLI**: `cli.py` → `ScopusClient` / `KakenClient` → `core` (pure functions) → `utils` (presentation).
+**MCP**: `mcp_server.py` → `ScopusClient` / `KakenClient` / `ProjectStore` → `core` / `scie` /
+`linking` → JSON dicts (no `utils` presentation layer).
+
+Both clients send through **one** `httpcache.HttpLayer`, minted per-client from a shared
+`HttpContext` (one SQLite cache + one `requests.Session` per process).
 
 ### Modules
 
+- **`httpcache`** — the single outbound HTTP seam for **both** clients. Timeout, connection
+  pooling, throttle, 429/5xx retry, and the SQLite response cache all live here.
+  - **Never write secrets to disk.** `apiKey`/`appid` live in `HttpLayer(auth_params=...)` and
+    are injected *after* the cache key and `params_json` are computed, so they cannot reach the
+    DB. `canonical_params()` also denylists them, and `tests/test_httpcache.py` dumps every
+    column asserting the key never appears. Keep all three defences.
+  - `_raw_get()` is a **module-level function on purpose**: with `session=None` it falls through
+    to `requests.get`, so the tests that patch `requests.get` keep working. Production passes a
+    `requests.Session`.
+  - `HttpResult` is *not* a `requests.Response`. It offers `.status_code` / `.content` /
+    `.text` / `.json()` only — check before reaching for `.ok` or `.raise_for_status()`.
+  - 429 + `X-ELS-Status: QUOTA_EXCEEDED` raises `QuotaExceeded` immediately and records
+    `quota_blocked`; later calls fail fast until the reset. **Never sleep for a quota reset** —
+    it can be days away. A 429 without that header is the per-second throttle and *is* retried.
+  - `HttpLayer.collect()` gathers `(api, fetched_at, cached)` for the requests made inside it;
+    that is how an operation's as-of date is derived (the **oldest** contributing request).
+  - Cache failures must never break a fetch: every `CacheDB` call goes through `_safe()`.
+
+- **`cachedb`** — SQLite persistence, no HTTP knowledge. `~/.scopus-tools/cache.sqlite3`
+  (`$SCOPUS_TOOLS_CACHE_DB` / `--cache-db` override; `$SCOPUS_TOOLS_CACHE_DISABLE=1` disables).
+  WAL + `busy_timeout` so the CLI and the MCP server can share it. `CHECK (status = 200)`
+  enforces "never cache a failure" at the schema level. A corrupt or version-mismatched DB is
+  moved aside and recreated — a cache is regenerable, so never block the user on migration.
+  - **Caching is HTTP-request-level only, deliberately.** There is no operation-level cache: if
+    page 2 of a paginated fetch fails, pages 1 and 3 are cached and the next run refetches only
+    page 2 — self-healing. An operation-level cache could persist a truncated paper list as
+    canonical, which would silently understate someone's publication record.
+
+- **`asof`** — freshness and as-of-date consistency. **Nothing ever auto-expires**: for
+  personnel review the compared researchers' data must share a fetch date, so refetching is
+  explicit (`--refresh` / `refresh=true`) and staleness is only *warned* about.
+  - Thresholds are **per API family** (`DEFAULT_STALE_DAYS`): `scopus_search` 7 days (citation
+    counts move), author/researcher lookups 90 (name→ID mappings barely change). `StalePolicy`
+    resolves defaults < `$SCOPUS_TOOLS_STALE_DAYS` < `--stale-days` < `--stale-days-for API=N`.
+  - `spread()` flags a comparison set whose fetch dates differ by more than a day. An unknown
+    fetch date is never treated as fresh.
+
 - **`api.ScopusClient`** — the only Scopus network boundary.
-  - `search_author_by_name` tries **both** `first last` and `last first` orderings and dedupes
-    by Scopus ID. Workaround for ambiguous name parsing — don't "fix" it to a single pattern.
+  - `search_papers_detailed()` returns a `FetchResult` carrying **`complete`**; `search_papers()`
+    returns just the list (unchanged contract). Incomplete means Scopus did not give us
+    everything — a non-200 mid-pagination, the 5,000-record pagination ceiling, an empty page
+    before the reported total, or a count shortfall beyond `PAGINATION_TOLERANCE`. Partial
+    results are still returned (no exception, as before) but callers **must** surface the fact:
+    a truncated list presented as a full publication record understates someone's output.
+    Note this is distinct from MCP's `truncated`, which just means we applied `limit`.
+  - `search_author(first_name, last_name)` is the primary entry point and issues **exactly one
+    request**. Author Search is the tightest Elsevier quota (**5,000/week, 2 req/s**), so we do
+    not spend two requests guessing the name order. If the caller gets the order wrong they
+    retry with the arguments swapped — the MCP host model can decide this, and the MCP tool's
+    zero-hit response carries a `hint` telling it to.
+  - `search_author_by_name(name, try_both=False)` splits on whitespace assuming
+    `given surname` and delegates. **This reverses an earlier deliberate design**: the old code
+    always tried both orderings because the CLI had no intelligence to pick one. `try_both=True`
+    preserves that behavior for the genuinely-unknown case, at double the quota cost.
+    `tests/test_legacy_compat.py` pins both behaviors.
+  - `search_papers` paginates with `view=COMPLETE`, dedupes by `eid`, takes `max(citations)`
+    on duplicates, and ORs `is_first_author` flags (computed by matching the entry's first
+    `authid` against the queried `author_ids` set).
   - `search_papers` paginates with `view=COMPLETE`, dedupes by `eid`, takes `max(citations)`
     on duplicates, and ORs `is_first_author` flags (computed by matching the entry's first
     `authid` against the queried `author_ids` set).
@@ -102,9 +173,9 @@ Two control flows:
   - `resolve_year_range` (internal default) and `default_eval_year_range` (user-facing default
     for the UI/CLI: previous year inclusive, 5-year window).
 
-- **`linking`** — Scopus author → KAKEN researcher number matching by name. Used by the CLI's
-  `eval --kaken-auto` flow. The WebUI does its own selection through the KAKEN tab and
-  doesn't rely on this module.
+- **`linking`** — Scopus author → KAKEN researcher number matching by name. Its only caller is
+  the MCP `link_kaken_researcher` tool. All of its output goes to **stderr**, and MCP passes
+  `interactive=False` so it never hits the `input()` branch — keep both properties if you edit it.
 
 - **`scie`** — Web of Science indexing check (SCIE/SSCI/AHCI/ESCI). Scopus has no WoS-index
   flag (that's a Clarivate/Web of Science concept), so this matches a paper's `issn`/`eissn`
@@ -119,36 +190,13 @@ Two control flows:
   - `annotate_papers_indexes(papers, index_sets)` sets `wos_indexes` (sorted label list) and
     `is_scie` (`"SCIE" in wos_indexes`) in-place; returns the count of papers in ≥1 index.
   - `annotate_papers(papers, issn_set)` — legacy single-set helper setting just `is_scie`.
+  - `resolve_index_paths(scie_list, scie_dir)` / `discover_index_sets(...)` — shared
+    startup loader (precedence: explicit list → all `*.csv` in dir → auto-detect
+    `*Citation Index*.csv` + `index/*.csv`). Called from `mcp_server.run`; the CLI passes
+    explicit paths via `load_index_sets`. Don't re-implement the glob logic elsewhere.
   - Lists are登録制 (Clarivate Master Journal List), one CSV per index, not auto-downloadable;
     pass them via `--scie-list`. Each index is a separate download — a single CSV has no
     per-row index label. The data files are gitignored.
-
-- **`llm`** — provider abstraction over OpenAI and Anthropic.
-  - `SUPPORTED_MODELS = ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4"]`,
-    `DEFAULT_MODEL = "claude-opus-4-7"`.
-  - `complete(model, prompt, *, json_mode=False, max_tokens=8192)` — non-streaming.
-  - `stream(model, prompt, *, max_tokens=8192)` — generator yielding **cumulative** text
-    (both providers normalized to this pattern).
-  - `parse_json_response(text)` — robust JSON parser (strips ```code fences``` and preamble).
-  - Provider is auto-detected from model name prefix (`gpt-*` / `claude-*`).
-
-- **`ai_engine`** — high-level evaluation functions, all routing through `llm.*`.
-  - `estimate_expertise(papers, lang, model)` — short expertise summary.
-  - `infer_field(papers, model)` and `_infer_field_context(model, all_titles)` — field
-    estimation in JSON mode (Anthropic uses prompt instruction + brace extraction).
-  - `evaluate_achievements(papers, report, lang, grants, extra_instructions, model, paper_list_mode, year_range)` — full
-    field-normalized evaluation. `paper_list_mode` selects how papers are fed to the prompt:
-    `"first_author"` (default) = top-10 cited with author position `n/m`; `"period_full"` =
-    all `year_range` papers with author position. Author position comes from `api.search_papers`
-    (`author_position` / `author_count`); the prompt always asks the model to weigh research
-    leadership (first vs co-author).
-  - `evaluate_achievements_stream(..., field_ctx=None, ..., paper_list_mode, year_range)` — streaming version. Pass
-    `field_ctx` to skip the inference call (WebUI caches it in `researcher.ai.field_ctx`).
-    The WebUI AI tab exposes `paper_list_mode` as a radio (saved in `researcher.ai.paper_mode`).
-  - `compare_researchers_stream(researchers_data, lang, extra_instructions, model)` —
-    multi-candidate comparison with field normalization (used by the WebUI comparison tab).
-  - `extra_instructions` is appended as `【評価の観点・追加指示】` to the prompt for
-    user-driven prompt control.
 
 - **`utils`** — CSV I/O (`utf-8-sig` output for Excel compatibility), logging setup,
   per-row progress helpers (`progress`, `progress_done`), and the two batch drivers
@@ -156,7 +204,8 @@ Two control flows:
   missing Scopus IDs are logged and skipped, not raised. Shared formatter helpers
   (`_hr`, `_section`) are used across the `print_*` functions.
 
-- **`projects`** — JSON-file project store for the WebUI. **Hierarchical model**:
+- **`projects`** — JSON-file project store, reached through the MCP project tools.
+  **Hierarchical model**:
   - Project (a department / committee / cohort) contains a `researchers` list.
   - Each researcher has `scopus`, `kaken`, `ai` sections.
   - Project also has a top-level `comparison` section for cross-researcher analysis.
@@ -164,47 +213,80 @@ Two control flows:
   - `_migrate_if_legacy()` auto-converts old flat-format files (a single researcher per project)
     on load — don't remove this until you're sure no old files exist.
 
-- **`cli`** — argparse dispatch only; no business logic.
-  - `KEY_REQUIREMENTS` is a static map for non-AI subcommands; AI subcommands use
-    `llm.required_key_for(model)` for dynamic dispatch in `_check_required_keys`.
-  - `_collect_targets` centralizes positional `ids` vs `--input` CSV mode for `summary`/`eval`.
+- **`mcp_server`** — MCP (stdio) frontend, 13 tools (the list lives in `_TOOLS`):
+  - Data retrieval: `search_author`, `author_profile`, `author_summary`, `list_papers`,
+    `kaken_search_researcher`, `kaken_grants`, `link_kaken_researcher`.
+  - Project persistence: `list_projects`, `read_project`, `create_project`, `delete_project`,
+    `save_researcher_section`, `save_comparison` — thin wrappers over `projects.py`.
+  - **No evaluation tool, by design** — the host model calls the retrieval tools iteratively
+    and reasons itself, rather than a tool nesting a second LLM call. Don't "complete the API"
+    by adding an `evaluate` / `compare` tool; `tests/test_mcp_server.py` guards the tool list.
+  - Tools are plain module-level functions (testable without the MCP protocol layer) that
+    return dicts. Missing API keys produce `{"error": ...}` rather than an exception, so the
+    host model can relay the problem. Clients and the `ProjectStore` are lazily constructed in
+    `_get_scopus` / `_get_kaken` / `_get_store`, so the server starts without any keys.
+  - `_server_class()` absorbs the SDK rename: MCP SDK 2.x has `mcp.server.MCPServer`,
+    1.x has `mcp.server.fastmcp.FastMCP`; `add_tool` / `run(transport=...)` are identical.
+  - **stdout is the JSON-RPC channel** — never `print()` to stdout from anything reachable
+    here. `utils.progress` already writes to stderr; `cli` calls
+    `utils.setup_logging(stream=sys.stderr)` (which passes `force=True`) before starting.
+  - `list_papers` caps results at `DEFAULT_PAPER_LIMIT` (200) and reports `truncated`.
+  - Every retrieval tool takes `refresh=False` (a **per-call** override — never set it on the
+    layer, it would leak into later calls) and returns `as_of` + `as_of_note`. The prose note
+    matters: models relay a sentence far more reliably than a raw timestamp.
+  - `read_project` / `save_comparison` attach `as_of_warning` when the researchers' fetch dates
+    differ by more than a day. It **warns, never blocks** — that was an explicit decision.
+  - Tool docstrings are sent to the model as the tool description — keep them useful.
 
-- **`webui`** — Gradio Blocks app.
-  - Left sidebar: project Dropdown + researcher Radio + new/rename/delete (2-step delete confirm).
-  - Right pane: 4 tabs (Scopus / KAKEN / AI / 比較).
-  - All long state held in `gr.State` (`current_project_name`, `current_researcher_name`,
-    `scopus_state`, `kaken_state`, etc.).
-  - Auto-saves on each "実行" via `_save_researcher_section` / `set_project_comparison`.
-  - Restore on project / researcher switch via `_researcher_to_updates` and
-    `_compare_pane_from_project` (returns a dict that gets tupled in `_RIGHT_OUTPUT_KEYS` /
-    `_COMPARE_OUTPUT_KEYS` order).
-  - Copy / Export buttons use client-side JS (`_COPY_JS`, `_download_js`) — no temp files on
-    the server (avoids a `gr.File` schema bug in `gradio_client` 1.3.x).
-  - Streaming AI evaluation is a `yield from` generator hooked to `ai_run_btn.click`.
-  - WoS index lists are loaded once at `launch(scie_list=..., scie_dir=...)` into the module
-    global `_INDEX_SETS` (via `_load_index_sets`; precedence: explicit `scie_list` → all `*.csv`
-    in `scie_dir` → auto-detect `*Citation Index*.csv` + `index/*.csv` in the launch dir).
-    Docker passes `--scie-dir /data/index`. `_scopus_run` annotates fetched papers with
-    `wos_indexes`, so the papers list (`print_papers_list`) and AI eval (`_build_eval_prompt`)
-    surface SCIE/SSCI/... automatically. The env banner reports which indexes were loaded.
+- **`mcp_setup`** — automates MCP client registration. Exists because two things reliably
+  break a hand-written registration, both verified empirically:
+  - **The command must be an absolute path.** MCP clients spawn the server without a shell,
+    so no venv activation and no `PATH`. `resolve_command()` resolves `sys.argv[0]` through
+    `os.path.realpath` (uv tool installs are symlinks), then `shutil.which`, then
+    `python -m scopus_tools.cli`.
+  - **Shell `export` does not reach the server.** Keys must be embedded at registration time.
+    `build_entry(with_keys=True)` reads them from the environment/`.env`; the CLI then
+    **always prints which file received the key in plain text**. `--no-keys` opts out.
+  - Config writes take a `.bak`, write atomically (`tempfile` + `os.replace`, mode 600),
+    then **re-read and verify no pre-existing top-level key or other `mcpServers` entry was
+    lost** — restoring from the backup and aborting if any were. Corrupt JSON is never
+    overwritten. Keep these guarantees; `tests/test_mcp_setup.py` pins them.
+  - Claude Code goes through the `claude mcp add` CLI rather than editing its config, so
+    scope handling stays with the official implementation.
+
+- **`cli`** — argparse dispatch only; no business logic.
+  - `KEY_REQUIREMENTS` is a static map consumed by `_check_required_keys`. `mcp` maps to an
+    empty list on purpose: it validates keys per tool call, not at startup.
+  - `_collect_targets` centralizes positional `ids` vs `--input` CSV mode for `summary`/`papers`.
+  - `YEAR_RANGE_HELP` is derived from `core.YEAR_RANGE_HELP` — keep the single source.
 
 ## Tests
 
 `tests/` uses `pytest` and mocks at the right boundaries:
 
 - `tests/test_scopus_tools.py` — primary suite. Mocks `ScopusClient` at the `requests.get`
-  level, mocks `llm.complete` / `llm.stream` for AI functions, uses `DUMMY_PAPERS` fixture.
-- `tests/test_llm.py` — provider abstraction unit tests. Mocks `openai.OpenAI` and
-  `anthropic.Anthropic` directly. No live API calls.
-- `tests/test_ai_engine_compare.py` — comparison and extra-instructions tests.
+  level, uses the `DUMMY_PAPERS` fixture. Also covers CLI dispatch (`_DUMMY_ENV`).
 - `tests/test_projects.py` — `ProjectStore` CRUD + legacy migration tests.
+- `tests/test_mcp_server.py` — MCP tool functions called directly (the protocol layer is not
+  exercised, so these need no MCP SDK). Covers the missing-key error path, `list_papers`
+  truncation, the project roundtrip on `tmp_path`, `core.parse_year_range`, and guards both
+  the exposed tool list and the absence of the LLM modules.
 - `tests/test_legacy_compat.py` — guards backward-compatible behavior against the
-  pre-refactor scripts in `old/` (gitignored).
+  pre-refactor scripts in `old/` (gitignored). Also pins the single-request author search
+  and the `try_both=True` escape hatch.
+- `tests/test_cachedb.py` / `tests/test_httpcache.py` — SQLite layer and the HTTP seam,
+  including the **secret-leak test** (dump every column, assert the key is absent) and the
+  quota/throttle/retry behaviors.
+- `tests/test_completeness.py` — the truncation guards. Highest-value file here.
+- `tests/test_asof.py` — threshold resolution order and comparison-set consistency.
+- `tests/test_mcp_setup.py` — registration path resolution and the config-preservation
+  guarantees (other servers survive, key loss rolls back, corrupt JSON is refused).
+- `tests/conftest.py` — an autouse fixture disables the cache and points `HOME` at `tmp_path`,
+  so the suite never touches the real `~/.scopus-tools` and no test can be served another
+  test's cached 200. It also exports `make_response()`, which fills `.content` **and**
+  `.json()` because the cache stores raw bytes.
 
-When you change the default model in `llm.DEFAULT_MODEL`, the test fixture `_DUMMY_ENV` in
-`tests/test_scopus_tools.py` must include the matching env key, and any test asserting the
-default's identity should use `llm.DEFAULT_MODEL` / `llm.required_key_for(llm.DEFAULT_MODEL)`
-instead of hard-coding.
+`.github/workflows/test.yml` runs the suite on Python 3.12 for every push and PR.
 
 ## Notes
 
@@ -213,10 +295,24 @@ instead of hard-coding.
   `utf-8` without reason.
 - Log progress messages in `search_papers` are intentionally in Japanese ("Scopus取得進捗…");
   the report text in `utils.print_report_text` is also Japanese. UI strings are not internationalized.
-- The WebUI's `_check_keys()` returns a 5-tuple `(scopus_ok, ai_ok, kaken_ok, openai_ok, anthropic_ok)`
-  where `ai_ok` is the OR of `openai_ok` / `anthropic_ok`. Adjust callers accordingly if you
-  add another provider.
-- Anthropic's `client.messages.stream(...)` requires `max_tokens` — `llm.stream` defaults to 8192
-  but the comparison flow uses 16384 for longer multi-candidate outputs.
-- Anthropic has no native JSON mode; `llm.complete(..., json_mode=True)` appends an instruction
-  in the prompt and `parse_json_response` falls back to brace extraction.
+- The MCP server's stdout is the JSON-RPC channel. If you add a code path reachable from a
+  tool, make sure it writes to stderr — a single stray stdout line breaks the handshake.
+- `docker-compose.yml` was removed with the WebUI: MCP is stdio, so there is no long-running
+  service to compose. The Docker image's `CMD` is `["--help"]` and the subcommand is given
+  at `docker run` time.
+- **Packaging as a macOS `.app` was considered and rejected** (v0.6.0). The sibling project
+  `../Secretary` does bundle one, but every reason it needs to — a WKWebView GUI, TCC/Full
+  Disk Access attributed to the bundle, a self-signed cert purely to stop ad-hoc cdhash churn
+  from revoking FDA, SMAppService — is absent here; this is a headless network client. The
+  costs are real and documented in that repo: no notarization (Gatekeeper blocks it on other
+  Macs), no auto-update, no CI, rebuilds silently breaking the launchd registration, and an
+  MCP registration pointing at a hardcoded `/Applications/...` path that is no better than the
+  `~/.local/bin/scopus-tools` you get from `uv tool install`. Distribution to people without
+  Python is already answered by the Docker image. Don't revisit this without a new reason.
+- API keys: `.env` (chmod 600) or the MCP client's config `env` (those files are already 600).
+  **Not** the macOS Keychain — an unsigned CLI spawned by varying parent processes hits
+  repeated authorization dialogs, and it would be macOS-only.
+- `utils.silence_url_logging()` clamps `urllib3`/`requests`/`httpx`/`httpcore` to WARNING.
+  Scopus passes `apiKey` as a **query parameter**, so those libraries print the key in full at
+  DEBUG level — and MCP client log files are not always private. It is called from both
+  `setup_logging()` and `HttpLayer.__init__` so the library path is covered too.

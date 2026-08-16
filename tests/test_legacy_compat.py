@@ -1,14 +1,10 @@
 import os
 from unittest.mock import MagicMock, patch
 
-import pandas as pd
+from scopus_tools import utils
 
 
-def make_response(payload, status_code=200):
-    response = MagicMock()
-    response.status_code = status_code
-    response.json.return_value = payload
-    return response
+from conftest import make_response  # noqa: F401  (共通のレスポンスモック)
 
 
 class TestLegacyAuthorSearchCompatibility:
@@ -46,12 +42,13 @@ class TestLegacyAuthorSearchCompatibility:
             }
         }
 
+        # try_both=True でのみ従来の 2 パターン挙動になる(移行用に温存)
         with patch(
             "requests.get",
             side_effect=[make_response(first_pattern_payload), make_response(second_pattern_payload)],
         ) as get_mock:
             client = ScopusClient(api_key="dummy")
-            results = client.search_author_by_name("Hiroyuki Okamura")
+            results = client.search_author_by_name("Hiroyuki Okamura", try_both=True)
 
         assert len(results) == 2
         assert [item["id"] for item in results] == ["100", "200"]
@@ -59,6 +56,53 @@ class TestLegacyAuthorSearchCompatibility:
         second_query = get_mock.call_args_list[1].kwargs["params"]["query"]
         assert first_query == "AUTHLASTNAME(Okamura) AND AUTHFIRST(Hiroyuki)"
         assert second_query == "AUTHLASTNAME(Hiroyuki) AND AUTHFIRST(Okamura)"
+
+    def test_search_author_by_name_defaults_to_a_single_request(self):
+        """既定は 1 リクエスト。Author Search は週 5,000 件と最も厳しいクォータのため。"""
+        from scopus_tools.api import ScopusClient
+
+        payload = {
+            "search-results": {
+                "entry": [
+                    {
+                        "dc:identifier": "AUTHOR_ID:100",
+                        "preferred-name": {"surname": "Okamura", "given-name": "Hiroyuki"},
+                        "affiliation-current": {"affiliation-name": "A University"},
+                        "document-count": "12",
+                    }
+                ]
+            }
+        }
+
+        with patch("requests.get", return_value=make_response(payload)) as get_mock:
+            client = ScopusClient(api_key="dummy")
+            results = client.search_author_by_name("Hiroyuki Okamura")
+
+        assert get_mock.call_count == 1
+        assert [item["id"] for item in results] == ["100"]
+        assert (get_mock.call_args.kwargs["params"]["query"]
+                == "AUTHLASTNAME(Okamura) AND AUTHFIRST(Hiroyuki)")
+
+    def test_search_author_takes_explicit_first_and_last(self):
+        from scopus_tools.api import ScopusClient
+
+        payload = {"search-results": {"entry": []}}
+        with patch("requests.get", return_value=make_response(payload)) as get_mock:
+            client = ScopusClient(api_key="dummy")
+            client.search_author("Hiroyuki", "Okamura")
+
+        assert get_mock.call_count == 1
+        assert (get_mock.call_args.kwargs["params"]["query"]
+                == "AUTHLASTNAME(Okamura) AND AUTHFIRST(Hiroyuki)")
+
+    def test_search_author_requires_both_names(self):
+        from scopus_tools.api import ScopusClient
+
+        with patch("requests.get") as get_mock:
+            client = ScopusClient(api_key="dummy")
+            assert client.search_author("Hiroyuki", "") == []
+            assert client.search_author("", "Okamura") == []
+        get_mock.assert_not_called()
 
 
 class TestLegacyPaperSearchCompatibility:
@@ -163,7 +207,7 @@ class TestLegacyUtilsCompatibility:
 
         input_path = tmp_path / "authors.csv"
         output_path = tmp_path / "authors_out.csv"
-        pd.DataFrame([{"Name": "Hiroyuki Okamura"}]).to_csv(input_path, index=False)
+        utils.save_output_csv([{"Name": "Hiroyuki Okamura"}], str(input_path))
 
         client = MagicMock()
         client.search_author_by_name.return_value = [
@@ -174,10 +218,10 @@ class TestLegacyUtilsCompatibility:
 
         utils.process_author_csv(str(input_path), str(output_path), client)
 
-        result = pd.read_csv(output_path)
+        result = utils.read_input_csv(str(output_path))
         assert len(result) == 2
-        assert set(result["Affiliation"]) == {"A University", "B Institute"}
-        a_ids = result.loc[result["Affiliation"] == "A University", "Scopus ID"].iloc[0]
+        assert {r["Affiliation"] for r in result} == {"A University", "B Institute"}
+        a_ids = next(r["Scopus ID"] for r in result if r["Affiliation"] == "A University")
         assert a_ids == "100,101"
 
     def test_print_report_text_includes_legacy_summary_fields(self, capsys):
@@ -225,12 +269,13 @@ class TestLegacyUtilsCompatibility:
 
         input_path = tmp_path / "batch.csv"
         output_path = tmp_path / "batch_out.csv"
-        pd.DataFrame(
+        utils.save_output_csv(
             [
                 {"Name": "A", "Scopus ID": "100,101", "Affiliation": "X Univ"},
-                {"Name": "B", "Scopus ID": None, "Affiliation": "Y Univ"},
-            ]
-        ).to_csv(input_path, index=False)
+                {"Name": "B", "Scopus ID": "", "Affiliation": "Y Univ"},
+            ],
+            str(input_path),
+        )
 
         client = MagicMock()
         client.get_author_profile.return_value = ("Hiroyuki", "Okamura")
@@ -241,8 +286,8 @@ class TestLegacyUtilsCompatibility:
 
         utils.process_batch_summary(str(input_path), str(output_path), client)
 
-        result = pd.read_csv(output_path)
-        assert list(result.columns) == [
+        result = utils.read_input_csv(str(output_path))
+        assert result.columns == [
             "Name",
             "Scopus IDs",
             "Affiliation",
@@ -258,26 +303,29 @@ class TestLegacyUtilsCompatibility:
             "G-index",
         ]
         assert len(result) == 1
-        assert result.loc[0, "Scopus IDs"] == "100, 101"
+        assert result[0]["Scopus IDs"] == "100, 101"
 
 
 class TestLegacyCliCompatibility:
     def test_stats_command_skips_missing_scopus_id_rows(self):
         from scopus_tools.cli import main
 
-        data_frame = pd.DataFrame(
+        # pandas を外したので CSV 読み込みは dict の list を返す。
+        # 空セルは pandas 時代の NaN ではなく空文字になる。
+        csv_rows = utils.CsvRows(
             [
                 {"Name": "A", "Scopus ID": "100,101"},
-                {"Name": "B", "Scopus ID": None},
-            ]
+                {"Name": "B", "Scopus ID": ""},
+            ],
+            columns=["Name", "Scopus ID"],
         )
         mock_client = MagicMock()
         mock_client.get_papers_by_year.return_value = {"paper_count": 2, "total_citations": 9, "Article": 2}
 
         with patch.dict(os.environ, {"SCOPUS_API_KEY": "dummy"}), \
              patch("scopus_tools.api.ScopusClient", return_value=mock_client), \
-             patch("scopus_tools.cli.load_dotenv"), \
-             patch("scopus_tools.utils.read_input_csv", return_value=data_frame), \
+             patch("scopus_tools.cli._load_env_files"), \
+             patch("scopus_tools.utils.read_input_csv", return_value=csv_rows), \
              patch("scopus_tools.utils.save_output_csv") as save_mock, \
              patch("sys.argv", ["scopus-tools", "stats", "--year", "[2020,2024]", "--input", "in.csv", "--output", "out.csv"]):
             main()

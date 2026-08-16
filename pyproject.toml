@@ -4,18 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scopus_tools"
-version = "0.3.1"
+version = "0.6.0"
+requires-python = ">=3.12"
 dependencies = [
-    "requests",
-    "pandas",
-    "python-dotenv",
-    "openai",
-    "anthropic",
+    "requests>=2.28",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
-ui = ["gradio>=4.0"]
+dev = ["pytest>=7.0"]
+mcp = ["mcp>=1.2"]
 
 [project.scripts]
 scopus-tools = "scopus_tools.cli:main"

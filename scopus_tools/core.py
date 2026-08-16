@@ -50,6 +50,39 @@ def default_eval_year_range(default_years=5, current_year=None):
     start_y = end_y - (default_years - 1)
     return (start_y, end_y)
 
+YEAR_RANGE_HELP = (
+    "Accepted forms: 2021-2025, 2021,2025, 2021:2025, [2021,2025]"
+)
+
+
+def parse_year_range(text, default_years=5):
+    """年範囲文字列をパースして (start, end) を返す純関数。
+
+    受理する書式: '[2021,2025]', '2021,2025', '2021-2025', '2021:2025'。
+    text が None なら `default_eval_year_range(default_years)`。
+    不正な書式や start > end なら ValueError を送出する
+    (呼び出し側が argparse の parser.error / MCP のエラー応答に変換する)。
+    """
+    if text is None:
+        return default_eval_year_range(default_years=default_years)
+
+    raw = str(text).strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1].strip()
+    for sep in (",", "-", ":"):
+        if sep in raw:
+            parts = [p.strip() for p in raw.split(sep)]
+            if len(parts) == 2 and all(p.isdigit() for p in parts):
+                start_y, end_y = int(parts[0]), int(parts[1])
+                if start_y > end_y:
+                    raise ValueError(
+                        f"start year must be <= end year (got {start_y} > {end_y})"
+                    )
+                return (start_y, end_y)
+            break
+    raise ValueError(f"year range '{text}' is invalid. {YEAR_RANGE_HELP}")
+
+
 def summarize_papers(papers, recent_years=5, year_range=None):
     """論文リストから統計情報を抽出する"""
     import datetime

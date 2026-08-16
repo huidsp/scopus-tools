@@ -24,8 +24,13 @@ _SAFE_NAME_RE = re.compile(r"[^-\w. ()ぁ-んァ-ヴ一-龯]")
 
 
 def default_projects_dir():
-    """既定の保存ディレクトリ: ~/.scopus-tools/projects/"""
-    return os.path.expanduser("~/.scopus-tools/projects")
+    """既定の保存ディレクトリ: ~/.scopus-tools/projects/
+
+    キャッシュ DB (`cachedb.default_db_path`) と同じ状態ディレクトリを共有する。
+    """
+    from scopus_tools.cachedb import default_state_dir
+
+    return os.path.join(default_state_dir(), "projects")
 
 
 def _sanitize_filename(name):
