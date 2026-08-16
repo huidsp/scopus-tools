@@ -17,6 +17,7 @@ KEY_REQUIREMENTS = {
     "summary":       ["SCOPUS_API_KEY"],
     "papers":        ["SCOPUS_API_KEY"],
     "batch":         ["SCOPUS_API_KEY"],
+    "find":          ["SCOPUS_API_KEY"],
     "kaken-search":  ["KAKEN_APP_ID"],
     "kaken-summary": ["KAKEN_APP_ID"],
     "mcp":           [],
@@ -236,6 +237,22 @@ def main():
     batch_p.add_argument("--input", required=True, help="Input CSV")
     batch_p.add_argument("--output", required=True, help="Output CSV path")
     batch_p.add_argument("--years", default=None, help=YEAR_RANGE_HELP + " (default: last 5 years)")
+
+    # 4b. find (タイトル / DOI から論文を引き、著者 ID を得る)
+    find_p = subparsers.add_parser(
+        "find", help="Find papers by title or DOI, with author Scopus IDs")
+    find_p.add_argument("--title", default=None, help="Paper title (partial titles work)")
+    find_p.add_argument("--doi", default=None, help="DOI (most reliable)")
+    find_p.add_argument("--last", dest="find_last_name", default=None,
+                        help="Author surname, to narrow an ambiguous title")
+    find_p.add_argument("--limit", type=int, default=10,
+                        help="Max papers to show (default: 10)")
+    find_p.add_argument("--abstract", dest="include_abstract", action="store_true",
+                        help="Include abstracts (long)")
+    find_p.add_argument("--format", choices=["text", "json"], default="text",
+                        help="Output format (default: text)")
+    find_p.add_argument("--output", default=None,
+                        help="Write to file path instead of stdout")
 
     # 5. kaken-search (科研費 KAKEN: 研究者検索)
     ks_p = subparsers.add_parser("kaken-search", help="Search KAKEN researcher by name or number")
@@ -723,6 +740,29 @@ def _dispatch(args, parser, http_ctx):
         client = api.ScopusClient(context=http_ctx)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         utils.process_batch_summary(args.input, args.output, client, year_range=year_range)
+
+    elif args.command == "find":
+        client = api.ScopusClient(context=http_ctx)
+        try:
+            fetched = client.find_papers(
+                title=args.title, doi=args.doi, author_last_name=args.find_last_name,
+                limit=args.limit, include_abstract=args.include_abstract)
+        except ValueError as e:
+            parser.error(f"find: {e}")
+        if not fetched.complete:
+            print(f"WARNING: {fetched.reason}", file=sys.stderr)
+        if args.format == "json":
+            _emit_json({
+                "query": {"title": args.title, "doi": args.doi,
+                          "author_last_name": args.find_last_name},
+                "total_count": fetched.expected_total,
+                "returned_count": len(fetched.papers),
+                "papers": fetched.papers,
+            }, args.output)
+        else:
+            _emit_text(lambda: utils.print_found_papers(fetched.papers,
+                                                        fetched.expected_total),
+                       args.output)
 
     elif args.command == "kaken-search":
         if not args.researcher_id and not args.name:

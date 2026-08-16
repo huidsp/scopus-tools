@@ -22,6 +22,7 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 - [必要要件](#必要要件)
 - [インストール](#インストール)
 - [MCP サーバ](#mcp-サーバ)
+  - [分裂した Author ID をまとめる](#分裂した-author-id-をまとめる)
 - [API キーの取得と設定](#api-キーの取得と設定)
   - [Scopus API キー (`SCOPUS_API_KEY`)](#scopus-api-キー-scopus_api_key)
   - [CiNii アプリケーション ID (`KAKEN_APP_ID`)](#cinii-アプリケーション-id-kaken_app_id)
@@ -52,6 +53,7 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
   取得日のずれの警告
 - 取得が途中で切れた場合の検出(切り詰めた論文リストを完全な業績として扱わない)
 - MCP クライアントへの登録の自動化(`mcp-setup`)
+- タイトル / DOI から論文を引き、**分裂した Author ID を特定して合算**
 
 ---
 
@@ -120,9 +122,10 @@ CLI と同じ内部ロジックを、ホスト側モデルから呼べる形で�
 | ツール | 引数 | 内容 |
 |---|---|---|
 | `search_author` | `first_name`, `last_name` | Scopus 著者候補を検索。姓名を分けて渡す(1 リクエスト)。0 件なら入れ替えて再試行 |
+| `find_papers` | `title`, `doi`, `author_last_name`, `limit`, `include_abstract` | タイトル / DOI から論文を引き、**著者を Scopus ID 付きで**返す。誌名・ISSN・巻号・DOI・所属機関・キーワードも含む |
 | `author_profile` | `author_id` | Scopus 著者 ID → 姓名 |
 | `author_summary` | `author_ids`, `year_range` | H/G-index、被引用、筆頭著者数、WoS 収録数などの集計 |
-| `list_papers` | `author_ids`, `year_range`, `limit`, `scie_only` | 期間内論文の一覧(`author_position` / `author_count` / `wos_indexes` 付き) |
+| `list_papers` | `author_ids`, `year_range`, `limit`, `scie_only`, `include_author_ids` | 期間内論文の一覧(`author_position` / `author_count` / `wos_indexes` 付き)。`include_author_ids=true` で共著者の Scopus ID も付く |
 | `kaken_search_researcher` | `name` | KAKEN(NRID)研究者候補の検索 |
 | `kaken_grants` | `researcher_id`, `role` | 研究者番号から科研費課題一覧 |
 | `link_kaken_researcher` | `first_name`, `last_name`, `auto` | Scopus 氏名 → KAKEN 研究者番号の自動照合 |
@@ -156,6 +159,26 @@ CLI と同じ内部ロジックを、ホスト側モデルから呼べる形で�
 - 取得が Scopus 側の都合で完結しなかった場合(ページング上限、通信エラーなど)、
   応答に `incomplete: true` と理由が入ります。これは `truncated`(こちらが `limit` で
   切った)とは別物で、**業績の全体像として扱ってはいけない**という意味です。
+
+### 分裂した Author ID をまとめる
+
+同じ研究者の論文が**複数の Scopus Author ID に分かれている**ことがあります
+(`author_summary` の論文数が本人の実績より明らかに少ないときはこれを疑ってください)。
+
+1. 欠けている論文を 1 件 `find_papers` で引く(タイトルか DOI)
+2. `authors_detail` からその研究者にあたる `authid` を読み取る
+3. `author_summary(author_ids="既知のID,新しいID")` のように**カンマ区切り**で渡す
+
+複数 ID を渡すと `eid` で重複除去し、被引用数は最大値、筆頭著者フラグは OR で
+統合されるので、そのまま合算した業績になります。CLI でも同じです:
+
+```bash
+scopus-tools find --title "論文タイトルの一部"
+#   著者:
+#     Surname X.   authid=<新しく判明した ID>   ← 欠けていた ID
+
+scopus-tools summary <既知のID>,<新しいID> --years 2018-2026
+```
 
 ### 登録(インストール)
 
@@ -269,7 +292,7 @@ claude mcp add scopus -- docker run -i --rm --env-file /path/to/.env \
 claude mcp list           # scopus が Connected になっていること
 ```
 
-Claude Code から `/mcp` でツール一覧(14 個)が見えれば成功です。
+Claude Code から `/mcp` でツール一覧(15 個)が見えれば成功です。
 プロジェクト JSON の既定の保存先は `~/.scopus-tools/projects/` です。
 
 > stdout は MCP プロトコル専用です。ログと進捗はすべて stderr に出るため、
@@ -417,9 +440,25 @@ scopus-tools papers 12345678 --format csv --output papers.csv
 scopus-tools papers 12345678 --scie-list "index/*.csv" --scie-only
 ```
 
-各論文に著者順位(`2/3`、`1/4 (first)`)が付きます。
+各論文に著者順位(`2/3`、`1/4 (first)`)、DOI、article-number、オープンアクセス区分が付きます。
 `--scie-list` を渡すと WoS 収録インデックス名も表示され、`--scie-only` で
 いずれかのインデックス収録誌だけに絞れます。
+
+### `find` — タイトル / DOI から論文を引く
+
+```bash
+scopus-tools find --title "Scalable motion style transfer"     # 一部のタイトルでも当たる
+scopus-tools find --doi 10.1000/example.2024.1                 # DOI が最も確実
+scopus-tools find --title "..." --last Yu                      # 同名論文があるとき絞る
+scopus-tools find --doi 10.1000/example.2024.1 --format json --output paper.json
+```
+
+**著者を Scopus Author ID 付きで**表示し、誌名 / ISSN / 巻号 / ページ /
+article-number / DOI / オープンアクセス / 所属機関 / キーワードも出します。
+`--abstract` で抄録も含められます(長いので既定では出しません)。
+
+主な用途は [分裂した Author ID をまとめる](#分裂した-author-id-をまとめる)ことです。
+タイトルの照合は緩く先頭数語や綴り違いでも当たるので、複数出たら誌名・年で確認してください。
 
 ### `batch` — CSV 入出力の一括サマリ
 
@@ -594,7 +633,7 @@ GitHub Container Registry (GHCR) で公式イメージを配布しています
 ```bash
 docker pull ghcr.io/huidsp/scopus-tools:latest   # 最新リリース
 docker pull ghcr.io/huidsp/scopus-tools:main     # main 追随版
-docker pull ghcr.io/huidsp/scopus-tools:0.6.0    # バージョン固定
+docker pull ghcr.io/huidsp/scopus-tools:0.7.0    # バージョン固定
 ```
 
 ### MCP サーバとして
@@ -638,12 +677,12 @@ docker run --rm --env-file .env -v "$PWD:/work" -w /work \
 | トリガー | publish されるタグ |
 |---|---|
 | `main` への push | `:main`, `:sha-<short>` |
-| `v*` タグの push (例: `v0.6.0`) | `:0.6.0`, `:0.6`, `:latest` |
+| `v*` タグの push (例: `v0.7.0`) | `:0.7.0`, `:0.7`, `:latest` |
 | Pull Request | (ビルドのみ、push なし) |
 
 ```bash
-git tag v0.6.0
-git push origin v0.6.0
+git tag v0.7.0
+git push origin v0.7.0
 ```
 
 ---

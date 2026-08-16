@@ -208,6 +208,50 @@ def search_author(first_name, last_name, refresh=False):
     return _with_as_of(payload, records, "scopus_author_search")
 
 
+def find_papers(title=None, doi=None, author_last_name=None, limit=10,
+                include_abstract=False, refresh=False):
+    """タイトルや DOI から論文を引き、**著者を Scopus Author ID 付きで**返す。
+
+    主な用途は **分裂した Author ID の特定**。ある研究者の論文が複数の Author ID に
+    分かれているとき(`author_summary` の論文数が本人の実績より明らかに少ないとき)、
+    欠けている論文を 1 件このツールで引き、`authors_detail` の中からその研究者に
+    あたる `authid` を読み取る。見つけた ID は
+    `author_summary(author_ids="既知のID,新しいID")` のようにカンマ区切りで渡せば
+    重複を除いて合算される。
+
+    title / doi / author_last_name は任意で、指定したものが AND で結合される。
+    DOI が分かっていれば最も確実。**タイトルの照合は緩く、先頭数語や 1 語の綴り違いでも
+    当たる**ので、複数返ったら誌名・年・著者で正しい論文か確認すること。
+
+    誌名・ISSN・巻号・ページ・DOI・オープンアクセス、著者の ORCID、所属機関
+    (名称・都市・国)、著者キーワードも返す。抄録は大きいので
+    include_abstract=True のときだけ含める。
+    """
+    try:
+        client = _get_scopus()
+    except RuntimeError as e:
+        return _error(str(e))
+    try:
+        with _fetching(client, refresh) as records:
+            fetched = client.find_papers(
+                title=title, doi=doi, author_last_name=author_last_name,
+                limit=limit, include_abstract=include_abstract)
+    except ValueError as e:
+        return _error(str(e))
+
+    payload = {
+        "query": {"title": title, "doi": doi, "author_last_name": author_last_name},
+        "total_count": fetched.expected_total,
+        "returned_count": len(fetched.papers),
+        "papers": fetched.papers,
+    }
+    if not fetched.papers:
+        payload["hint"] = ("No match. Scopus title matching is loose, so try fewer words, "
+                           "or use the DOI if you have it.")
+    _attach_completeness(payload, fetched)
+    return _with_as_of(payload, records, "scopus_search")
+
+
 def author_profile(author_id, refresh=False):
     """Scopus 著者 ID からプロフィール(姓名)を取得する。"""
     try:
@@ -255,11 +299,15 @@ def author_summary(author_ids, year_range=None, refresh=False):
 
 
 def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_only=False,
-                refresh=False):
+                include_author_ids=False, refresh=False):
     """指定期間に出版された論文を、著者順位と WoS 収録インデックス付きで列挙する。
 
     応答の `as_of` / `as_of_note` に「いつ時点のデータか」が入る。
     refresh=True でキャッシュを無視して取り直す。
+
+    include_author_ids=True にすると各論文に共著者の Scopus Author ID が付く。
+    既定で付けないのは応答が大きくなるため。1 本の論文の著者 ID を知りたいだけなら
+    `find_papers` の方が軽い。
     """
     try:
         client = _get_scopus()
@@ -277,7 +325,8 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
 
     query_extra = f"PUBYEAR > {start_y - 1} AND PUBYEAR < {end_y + 1}"
     with _fetching(client, refresh) as records:
-        fetched = client.search_papers_detailed(ids, query_extra=query_extra)
+        fetched = client.search_papers_detailed(ids, query_extra=query_extra,
+                                                detail=include_author_ids)
     papers = fetched.papers
     if _INDEX_SETS:
         scie.annotate_papers_indexes(papers, _INDEX_SETS)
@@ -477,6 +526,7 @@ def cache_stats():
 _TOOLS = [
     # データ取得
     search_author,
+    find_papers,
     author_profile,
     author_summary,
     list_papers,

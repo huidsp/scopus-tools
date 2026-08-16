@@ -379,7 +379,7 @@ class TestToolRegistry:
         """公開ツールは取得系とプロジェクト永続化のみ(AI 評価は持たない)。"""
         names = {fn.__name__ for fn in mcp_server._TOOLS}
         assert names == {
-            "search_author", "author_profile", "author_summary",
+            "search_author", "find_papers", "author_profile", "author_summary",
             "list_papers", "kaken_search_researcher", "kaken_grants",
             "link_kaken_researcher",
             "list_projects", "read_project", "create_project",

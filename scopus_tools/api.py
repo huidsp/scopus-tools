@@ -12,6 +12,11 @@ SCOPUS_PAGINATION_LIMIT = 5000
 # 取得件数 / 総件数の許容比。ページ間の重複排除と件数変動を吸収する。
 PAGINATION_TOLERANCE = 0.98
 
+# find_papers が API に投げる件数。limit と切り離して固定にしてある:
+# キャッシュキーは全パラメータを含むので、count を可変にすると limit を変えるたびに
+# 別エントリになり同じ論文を取り直してしまう。
+FIND_PAGE_SIZE = 25
+
 
 class FetchResult:
     """取得結果と「完全に取れたか」。
@@ -41,6 +46,86 @@ class FetchResult:
             "expected_total": self.expected_total,
             "actual_total": self.actual_total,
         }
+
+
+def _as_list(value):
+    """Scopus は要素が 1 つのとき配列ではなく dict を返すことがある。"""
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def parse_entry(entry, author_ids=None, detail=False, include_abstract=False):
+    """Scopus の 1 エントリを論文 dict に変換する。
+
+    `author_ids` を渡すと、その著者が何番目か(`author_position`)と筆頭著者か
+    (`is_first_author`)を判定する。**`author_ids=None` のときは判定できないので
+    どちらも `None`** を入れる(`False` や 0 にすると「筆頭ではない」と誤読される)。
+
+    `detail=True` で著者の Scopus ID・所属・キーワードなどを足す。既定で足さないのは、
+    `list_papers` が最大 200 件返すため、1 件あたりのサイズがそのまま応答量になるから。
+    抄録はさらに大きい(1 件 1,500 文字程度)ので `include_abstract` で別扱いにする。
+    """
+    authors = _as_list(entry.get("author"))
+    auth_list = [a.get("authname") for a in authors]
+
+    first_author_flag = None
+    author_position = None
+    if author_ids is not None:
+        first_author_flag = bool(authors) and authors[0].get("authid") in author_ids
+        for pos, a in enumerate(authors, start=1):
+            if a.get("authid") in author_ids:
+                author_position = pos
+                break
+
+    paper = {
+        "title": entry.get("dc:title"),
+        "year": int(entry.get("prism:coverDate", "0000")[:4]),
+        "citations": int(entry.get("citedby-count", 0)),
+        "journal": entry.get("prism:publicationName"),
+        "issn": entry.get("prism:issn", ""),
+        "eissn": entry.get("prism:eIssn", ""),
+        "volume": entry.get("prism:volume", ""),
+        "issue": entry.get("prism:issueIdentifier", ""),
+        "pages": entry.get("prism:pageRange", ""),
+        "aggregation_type": entry.get("prism:aggregationType", ""),
+        "type": entry.get("subtypeDescription"),
+        "eid": entry.get("eid"),
+        "auth_list": auth_list,
+        "authors": ", ".join(a for a in auth_list if a),
+        "is_first_author": first_author_flag,
+        "author_position": author_position,
+        "author_count": len(authors),
+        # 安価で価値の高いものは全経路に入れる(1 件あたり数十バイト)
+        "doi": entry.get("prism:doi", ""),
+        # pageRange が無く article-number だけを持つ論文がある
+        "article_number": entry.get("article-number", "") or "",
+        "open_access": bool(entry.get("openaccessFlag")),
+    }
+
+    if detail:
+        paper["authors_detail"] = [{
+            "name": a.get("authname"),
+            "authid": a.get("authid"),
+            "surname": a.get("surname"),
+            "given_name": a.get("given-name"),
+            "orcid": a.get("orcid"),
+            "sequence": a.get("@seq"),
+        } for a in authors]
+        paper["affiliations"] = [{
+            "name": af.get("affilname"),
+            "city": af.get("affiliation-city"),
+            "country": af.get("affiliation-country"),
+            "afid": af.get("afid"),
+        } for af in _as_list(entry.get("affiliation"))]
+        keywords = entry.get("authkeywords") or ""
+        paper["keywords"] = [k.strip() for k in keywords.split("|") if k.strip()]
+        paper["source_id"] = entry.get("source-id", "")
+        paper["cover_date"] = entry.get("prism:coverDate", "")
+        if include_abstract:
+            paper["abstract"] = entry.get("dc:description") or ""
+
+    return paper
 
 
 class ScopusClient:
@@ -156,6 +241,67 @@ class ScopusClient:
                     len(results), name)
         return results
 
+    def find_papers(self, title=None, doi=None, author_last_name=None,
+                    limit=10, include_abstract=False):
+        """タイトル / DOI / 著者姓から論文を引く(**著者の Scopus ID 付き**)。
+
+        ある研究者の論文が複数の Author ID に分裂しているとき、その論文を 1 件引いて
+        著者一覧の `authid` を見れば、もう一方の ID が分かる。
+
+        Scopus のタイトル照合は緩く、先頭数語や 1 語の綴り違いでも当たる(実測)。
+        単一ヒットを前提にせず、複数返して呼び出し側に判断させる。
+        """
+        clauses = []
+        if title:
+            # Scopus のクエリはダブルクォートで囲むので、値の側の " は落とす
+            clauses.append(f'TITLE("{str(title).replace(chr(34), " ").strip()}")')
+        if doi:
+            clauses.append(f'DOI("{str(doi).replace(chr(34), " ").strip()}")')
+        if author_last_name:
+            clauses.append(f"AUTHLASTNAME({str(author_last_name).replace(chr(34), ' ').strip()})")
+        if not clauses:
+            raise ValueError("find_papers requires at least one of title, doi or author_last_name")
+
+        query = " AND ".join(clauses)
+        logger.info("Finding papers: %s", query)
+
+        # count は常に FIND_PAGE_SIZE で投げる。キャッシュキーは全パラメータを含むので、
+        # limit をそのまま渡すと limit を変えるたびに別エントリになり再取得してしまう。
+        response = self._http.get(
+            f"{self.base_url}/search/scopus",
+            params={"query": query, "count": FIND_PAGE_SIZE, "view": "COMPLETE"},
+            headers={"Accept": "application/json"},
+            api="scopus_search")
+
+        if response.status_code != 200:
+            reason = f"HTTP {response.status_code}"
+            logger.error("find_papers failed: %s", reason)
+            return FetchResult(papers=[], complete=False, reason=reason, request_count=1)
+
+        data = response.json().get("search-results", {})
+        try:
+            total = int(data.get("opensearch:totalResults", 0))
+        except (TypeError, ValueError):
+            total = None
+        entries = data.get("entry", [])
+        # 0 件のとき Scopus は error を持つダミー entry を返すことがある
+        entries = [e for e in entries if e.get("eid")]
+
+        papers = [parse_entry(e, author_ids=None, detail=True,
+                              include_abstract=include_abstract)
+                  for e in entries]
+        limit = max(1, int(limit or 10))
+        complete = True
+        reason = None
+        if total is not None and total > len(papers):
+            complete = False
+            reason = (f"{total} papers matched but only the first {len(papers)} were "
+                      f"retrieved; narrow the query (add --doi or --last)")
+        logger.info("find_papers: %d matched, returning %d", total or 0, min(len(papers), limit))
+        return FetchResult(papers=papers[:limit], complete=complete, reason=reason,
+                           request_count=1, expected_total=total,
+                           actual_total=min(len(papers), limit))
+
     def search_papers(self, author_ids, query_extra="", page_size=25):
         """論文リストを返す(既存の契約)。不完全でも部分結果を返す。
 
@@ -163,13 +309,15 @@ class ScopusClient:
         """
         return self.search_papers_detailed(author_ids, query_extra, page_size).papers
 
-    def search_papers_detailed(self, author_ids, query_extra="", page_size=25):
+    def search_papers_detailed(self, author_ids, query_extra="", page_size=25, detail=False):
         """論文リストと **完全性の判定** を返す。
 
         非 200 でループを抜けた場合、Scopus のページング上限(start > 5000)に
         達した場合、件数が総数と噛み合わない場合は `complete=False` になる。
         切り詰められた論文リストを「完全な業績」として扱うと、人事評価で
         論文数・被引用数を過小に見せてしまうため、必ず呼び出し側に伝える。
+
+        `detail=True` で各論文に共著者の Scopus ID などを付ける(応答が大きくなる)。
         """
         papers_dict = {}
         query = " OR ".join([f"AU-ID({aid})" for aid in author_ids])
@@ -243,42 +391,10 @@ class ScopusClient:
                 if not eid:
                     continue
 
-                authors = e.get("author", [])
-                if isinstance(authors, dict):
-                    authors = [authors]
-                auth_list = [a.get("authname") for a in authors]
-
-                first_author_flag = False
-                author_position = None
-                if authors:
-                    first_authid = authors[0].get("authid")
-                    if first_authid in author_ids:
-                        first_author_flag = True
-                    # クエリした著者(複数IDなら最初に一致したもの)が何番目かを求める
-                    for pos, a in enumerate(authors, start=1):
-                        if a.get("authid") in author_ids:
-                            author_position = pos
-                            break
-
-                new_entry = {
-                    "title": e.get("dc:title"),
-                    "year": int(e.get("prism:coverDate", "0000")[:4]),
-                    "citations": int(e.get("citedby-count", 0)),
-                    "journal": e.get("prism:publicationName"),
-                    "issn": e.get("prism:issn", ""),
-                    "eissn": e.get("prism:eIssn", ""),
-                    "volume": e.get("prism:volume", ""),
-                    "issue": e.get("prism:issueIdentifier", ""),
-                    "pages": e.get("prism:pageRange", ""),
-                    "aggregation_type": e.get("prism:aggregationType", ""),
-                    "type": e.get("subtypeDescription"),
-                    "eid": eid,
-                    "auth_list": auth_list,
-                    "authors": ", ".join(a for a in auth_list if a),
-                    "is_first_author": first_author_flag,
-                    "author_position": author_position,
-                    "author_count": len(authors),
-                }
+                new_entry = parse_entry(e, author_ids, detail=detail)
+                authors = new_entry["auth_list"]
+                first_author_flag = new_entry["is_first_author"]
+                author_position = new_entry["author_position"]
 
                 if eid in papers_dict:
                     # 重複EIDはcitationsの最大値とis_first_authorのORでマージ。
@@ -289,7 +405,7 @@ class ScopusClient:
                     if author_position is not None and (existing_pos is None or author_position < existing_pos):
                         papers_dict[eid]["author_position"] = author_position
                     if not papers_dict[eid].get("author_count"):
-                        papers_dict[eid]["author_count"] = len(authors)
+                        papers_dict[eid]["author_count"] = new_entry["author_count"]
                 else:
                     papers_dict[eid] = new_entry
             start += page_size

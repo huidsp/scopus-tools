@@ -331,6 +331,8 @@ def save_papers_csv(rows, output_path):
         "Name", "Scopus IDs", "Year", "Title", "Authors", "Journal",
         "ISSN", "eISSN", "Volume", "Issue", "Pages", "Type", "Citations",
         "Author Position", "Author Count", "First Author", "EID",
+        # 新しい列は末尾に足す(既存の列順を変えると下流の処理が壊れるため)
+        "DOI", "Article Number", "Open Access",
     ]
     if has_wos:
         fieldnames.append("WoS Index")
@@ -358,11 +360,56 @@ def save_papers_csv(rows, output_path):
                 "Author Count": p.get("author_count", ""),
                 "First Author": "Yes" if p.get("is_first_author") else "",
                 "EID": p.get("eid", ""),
+                "DOI": p.get("doi", ""),
+                "Article Number": p.get("article_number", ""),
+                "Open Access": "Yes" if p.get("open_access") else "",
             }
             if has_wos:
                 row["WoS Index"] = "|".join(p.get("wos_indexes") or [])
             out.append(row)
     write_csv(out, output_path, fieldnames)
+
+
+def print_found_papers(papers, total=None):
+    """`find` の結果を表示する。**著者は Scopus Author ID 付き**で並べる。
+
+    この機能の主目的が「分裂した Author ID の特定」なので、ID が読み取れる形にする。
+    """
+    if not papers:
+        print("該当する論文がありません。語数を減らすか、DOI を指定してください。")
+        return
+    if total is not None and total > len(papers):
+        print(f"{total} 件が該当し、うち {len(papers)} 件を表示します。\n")
+    for i, p in enumerate(papers):
+        if i > 0:
+            print(_hr("-"))
+        print(f"{p.get('title', '')}")
+        bits = [b for b in (p.get("journal"), str(p.get("year") or ""),
+                            f"Vol.{p['volume']}" if p.get("volume") else "",
+                            f"No.{p['issue']}" if p.get("issue") else "",
+                            f"pp.{p['pages']}" if p.get("pages") else "",
+                            f"Art.{p['article_number']}" if p.get("article_number") else "") if b]
+        print("  " + " / ".join(bits))
+        meta = [f"{p.get('type', '')}", f"被引用 {p.get('citations', 0)}"]
+        if p.get("doi"):
+            meta.append(f"DOI {p['doi']}")
+        if p.get("issn") or p.get("eissn"):
+            meta.append(f"ISSN {p.get('issn') or '-'} / eISSN {p.get('eissn') or '-'}")
+        if p.get("open_access"):
+            meta.append("OA")
+        print("  " + " | ".join(m for m in meta if m))
+        print("  著者:")
+        for a in p.get("authors_detail") or []:
+            orcid = f"  ORCID {a['orcid']}" if a.get("orcid") else ""
+            print(f"    {str(a.get('name') or ''):20} authid={a.get('authid')}{orcid}")
+        affs = [af.get("name") for af in (p.get("affiliations") or []) if af.get("name")]
+        if affs:
+            print(f"  所属: {', '.join(affs)}")
+        if p.get("keywords"):
+            print(f"  キーワード: {', '.join(p['keywords'])}")
+        if p.get("abstract"):
+            print(f"  抄録: {p['abstract'][:300]}...")
+        print(f"  EID : {p.get('eid', '')}")
 
 
 def print_kaken_researcher_results(query, results):

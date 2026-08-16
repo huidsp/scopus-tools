@@ -140,6 +140,29 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     fetch date is never treated as fresh.
 
 - **`api.ScopusClient`** — the only Scopus network boundary.
+  - `parse_entry(entry, author_ids=None, detail=False, include_abstract=False)` turns one
+    Scopus entry into a paper dict, shared by every fetch path.
+    - **`author_ids=None` leaves `is_first_author` and `author_position` as `None`**, not
+      `False`/0 — `find_papers` does not know whose paper it is, and a `False` there reads as
+      "not the first author", which is a different claim from "unknown".
+    - Cheap, high-value fields (`doi`, `article_number`, `open_access`) are on **every** path.
+      Everything expensive (`authors_detail` with Scopus author IDs, `affiliations`,
+      `keywords`) is behind `detail=True`, and the abstract behind `include_abstract`,
+      because `list_papers` returns up to 200 papers and per-paper size is the response size.
+    - `auth_list` / `authors` must keep their exact shape — `utils.print_papers_list`, the CSV
+      export and `tests/test_legacy_compat.py` depend on them. Add, never change.
+  - `find_papers(title=, doi=, author_last_name=)` ANDs whatever is given into
+    `TITLE(...) AND DOI(...) AND AUTHLASTNAME(...)`. Its purpose is resolving **split author
+    profiles**: pull one missing paper, read the `authid` out of `authors_detail`, then pass
+    both IDs to `author_summary` comma-separated (dedup by `eid` already merges them).
+    - Scopus title matching is loose — measured: leading words alone, punctuation, and even a
+      one-word misspelling all hit. Never assume a single result; return several and let the
+      caller judge.
+    - It always requests `count=FIND_PAGE_SIZE` (25) and slices to `limit` locally. The cache
+      key covers every parameter, so a variable `count` would create a separate cache entry
+      per `limit` and refetch the same papers.
+    - Quota/throttle stays `scopus_search`. The 30-day staleness threshold is left as-is even
+      though authids never change, because the same response carries citation counts.
   - `search_papers_detailed()` returns a `FetchResult` carrying **`complete`**; `search_papers()`
     returns just the list (unchanged contract). Incomplete means Scopus did not give us
     everything — a non-200 mid-pagination, the 5,000-record pagination ceiling, an empty page
