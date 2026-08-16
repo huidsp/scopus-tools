@@ -253,6 +253,12 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     overwritten. Keep these guarantees; `tests/test_mcp_setup.py` pins them.
   - Claude Code goes through the `claude mcp add` CLI rather than editing its config, so
     scope handling stays with the official implementation.
+  - **`tcc_warnings()` refuses to register a path under `~/Documents`, `~/Desktop` or
+    `~/Downloads`.** Those are TCC-protected on macOS and a GUI client cannot read them: a
+    venv there dies with `PermissionError: ... pyvenv.cfg` before Python finishes starting.
+    This actually happened — Claude Code (terminal, has permission) connected fine while
+    Claude Desktop could not start the server at all, so it is easy to miss. Install via
+    `uv tool install` (`~/.local`) and keep the index CSVs in `~/.scopus-tools/index`.
 
 - **`cli`** — argparse dispatch only; no business logic.
   - `KEY_REQUIREMENTS` is a static map consumed by `_check_required_keys`. `mcp` maps to an

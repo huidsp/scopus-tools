@@ -231,3 +231,54 @@ class TestEnvPermissions:
         env.write_text("SCOPUS_API_KEY=x\n")
         env.chmod(0o600)
         assert mcp_setup.check_env_permissions(str(env))["world_readable"] is False
+
+
+class TestTccProtectedPaths:
+    """~/Documents 配下を登録すると GUI クライアントからは起動すらできない。
+
+    実測した失敗:
+      PermissionError: [Errno 1] Operation not permitted: '.../.venv/pyvenv.cfg'
+    ターミナル経由の Claude Code は権限があるため通ってしまい、気付きにくい。
+    """
+
+    @pytest.mark.parametrize("folder", ["Documents", "Desktop", "Downloads"])
+    def test_detects_protected_folders(self, folder, monkeypatch):
+        monkeypatch.setattr(mcp_setup.sys, "platform", "darwin")
+        home = os.path.expanduser("~")
+        assert mcp_setup.tcc_protected(f"{home}/{folder}/proj/.venv/bin/x") == folder
+
+    def test_safe_paths_are_not_flagged(self, monkeypatch):
+        monkeypatch.setattr(mcp_setup.sys, "platform", "darwin")
+        home = os.path.expanduser("~")
+        assert mcp_setup.tcc_protected(f"{home}/.local/bin/scopus-tools") is None
+        assert mcp_setup.tcc_protected(f"{home}/.scopus-tools/index") is None
+        assert mcp_setup.tcc_protected(None) is None
+
+    def test_not_applied_off_macos(self, monkeypatch):
+        monkeypatch.setattr(mcp_setup.sys, "platform", "linux")
+        home = os.path.expanduser("~")
+        assert mcp_setup.tcc_protected(f"{home}/Documents/x") is None
+
+    def test_warns_about_the_executable(self, monkeypatch):
+        monkeypatch.setattr(mcp_setup.sys, "platform", "darwin")
+        home = os.path.expanduser("~")
+        entry = {"command": f"{home}/Documents/repo/.venv/bin/scopus-tools", "args": ["mcp"]}
+        problems = mcp_setup.tcc_warnings(entry)
+        assert len(problems) == 1
+        assert problems[0][1] == "Documents"
+
+    def test_warns_about_data_directories(self, monkeypatch):
+        monkeypatch.setattr(mcp_setup.sys, "platform", "darwin")
+        home = os.path.expanduser("~")
+        entry = {"command": f"{home}/.local/bin/scopus-tools",
+                 "args": ["mcp", "--scie-dir", f"{home}/Documents/repo/index",
+                          "--projects-dir", f"{home}/.scopus-tools/projects"]}
+        problems = mcp_setup.tcc_warnings(entry)
+        assert [p[2] for p in problems] == ["--scie-dir"]
+
+    def test_clean_entry_has_no_warnings(self, monkeypatch):
+        monkeypatch.setattr(mcp_setup.sys, "platform", "darwin")
+        home = os.path.expanduser("~")
+        entry = {"command": f"{home}/.local/bin/scopus-tools",
+                 "args": ["mcp", "--scie-dir", f"{home}/.scopus-tools/index"]}
+        assert mcp_setup.tcc_warnings(entry) == []

@@ -28,6 +28,53 @@ DEFAULT_SERVER_NAME = "scopus"
 KEY_NAMES = ("SCOPUS_API_KEY", "KAKEN_APP_ID")
 
 
+# macOS の TCC(プライバシー保護)が守るディレクトリ。GUI アプリから起動された
+# プロセスは既定でここを読めない。
+#
+# **実測した失敗**: `~/Documents/.../.venv/bin/scopus-tools` を Claude Desktop に
+# 登録すると、Python が `pyvenv.cfg` すら読めずに落ちる:
+#   Fatal Python error: init_import_site: Failed to import the site module
+#   PermissionError: [Errno 1] Operation not permitted: '.../.venv/pyvenv.cfg'
+# ターミナル経由の Claude Code では権限があるため通ってしまい、気付きにくい。
+TCC_PROTECTED_DIRS = ("Documents", "Desktop", "Downloads")
+
+
+def tcc_protected(path):
+    """パスが macOS の TCC 保護ディレクトリ配下かどうか。
+
+    保護対象でなければ None、対象ならその親ディレクトリ名を返す。
+    """
+    if sys.platform != "darwin" or not path:
+        return None
+    home = os.path.realpath(os.path.expanduser("~"))
+    real = os.path.realpath(os.path.expanduser(str(path)))
+    for name in TCC_PROTECTED_DIRS:
+        root = os.path.join(home, name)
+        if real == root or real.startswith(root + os.sep):
+            return name
+    return None
+
+
+def tcc_warnings(entry):
+    """登録内容のうち TCC 保護配下にあるパスを洗い出す。
+
+    ここに引っかかったまま登録すると、Claude Desktop からは起動すらできない。
+    """
+    problems = []
+    protected = tcc_protected(entry.get("command"))
+    if protected:
+        problems.append((entry["command"], protected, "the executable"))
+    args = entry.get("args") or []
+    for i, arg in enumerate(args):
+        if arg in ("--scie-dir", "--projects-dir", "--cache-db", "--scie-list"):
+            if i + 1 < len(args):
+                value = args[i + 1]
+                protected = tcc_protected(value)
+                if protected:
+                    problems.append((value, protected, arg))
+    return problems
+
+
 def claude_desktop_config_path():
     """Claude Desktop の設定ファイルのパス(OS ごと)。"""
     if sys.platform == "darwin":

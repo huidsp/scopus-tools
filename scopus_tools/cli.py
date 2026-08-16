@@ -290,6 +290,10 @@ def main():
     setup_p.add_argument("--no-keys", dest="no_keys", action="store_true",
                          help="Do not embed API keys in the registration "
                               "(the server will then need them from its own environment)")
+    setup_p.add_argument("--allow-protected-paths", dest="allow_protected_paths",
+                         action="store_true",
+                         help="Register even if a path is inside ~/Documents, ~/Desktop or "
+                              "~/Downloads (macOS TCC). A GUI client will fail to start it.")
     setup_p.add_argument("--fix-permissions", dest="fix_permissions", action="store_true",
                          help="chmod 600 the .env file if it is readable by others")
     setup_p.add_argument("--scie-dir", dest="setup_scie_dir", default=None, metavar="DIR",
@@ -423,6 +427,26 @@ def _mcp_setup_command(args, parser):
             cmd = mcp_setup.claude_code_command(entry, name=args.name, scope=args.scope)
             print(" ".join(_mask_keys(cmd)))
         return
+
+    # TCC 保護配下のパスを登録すると Claude Desktop からは起動すらできない。
+    # (Claude Code はターミナル経由で権限があるため通ってしまい、気付きにくい)
+    problems = mcp_setup.tcc_warnings(entry)
+    if problems:
+        print("ERROR: these paths are inside a macOS privacy-protected folder, so a GUI "
+              "client like Claude Desktop cannot read them:", file=sys.stderr)
+        for path, folder, what in problems:
+            print(f"  {what}: {path}   (~/{folder} is TCC-protected)", file=sys.stderr)
+        print("\nThe server would fail to start with a PermissionError before it could "
+              "even report anything. Install and point at paths outside ~/Documents, "
+              "~/Desktop and ~/Downloads:", file=sys.stderr)
+        print('  uv tool install "scopus_tools[mcp] @ /path/to/repo"', file=sys.stderr)
+        print("  mkdir -p ~/.scopus-tools/index && cp /path/to/repo/index/*.csv "
+              "~/.scopus-tools/index/", file=sys.stderr)
+        print("  scopus-tools mcp-setup --claude-desktop --scie-dir ~/.scopus-tools/index",
+              file=sys.stderr)
+        print("\nPass --allow-protected-paths to register anyway.", file=sys.stderr)
+        if not args.allow_protected_paths:
+            parser.error("mcp-setup: refusing to register a path a GUI client cannot read")
 
     keys = {} if args.no_keys else mcp_setup.collect_keys()
     try:

@@ -171,14 +171,31 @@ CLI と同じ内部ロジックを、ホスト側モデルから呼べる形で�
    MCP クライアントが設定するカレントディレクトリは環境によって違うので、
    **登録時に環境変数として渡すのが確実**です
 
+> **macOS で最重要**: `~/Documents` / `~/Desktop` / `~/Downloads` は TCC
+> (プライバシー保護)の対象で、**Claude Desktop はそこを読めません**。リポジトリの
+> `.venv` を直接登録すると `pyvenv.cfg` すら読めず、Python が起動する前に落ちます:
+>
+> ```
+> PermissionError: [Errno 1] Operation not permitted: '.../.venv/pyvenv.cfg'
+> ```
+>
+> ターミナル経由の Claude Code は権限があるため通ってしまい、気付きにくい罠です。
+> **実行ファイルも索引 CSV も TCC 保護外に置いてください。**
+> `mcp-setup` はこれを検出して登録を拒否します。
+
 #### 方法 A: `mcp-setup` に任せる(推奨)
 
-上の 2 点(絶対パスの解決と鍵の受け渡し)を自動でやります。
+上の 3 点(絶対パス・鍵の受け渡し・TCC 保護パスの回避)を自動でやります。
 
 ```bash
+# TCC 保護外にインストールする(~/.local は Claude Desktop の PATH にも入っている)
 uv tool install "scopus_tools[mcp] @ /path/to/scopus-tools"
 
-scopus-tools mcp-setup --scope user --scie-dir /path/to/index
+# 索引 CSV も TCC 保護外へ
+mkdir -p ~/.scopus-tools/index && cp /path/to/scopus-tools/index/*.csv ~/.scopus-tools/index/
+
+scopus-tools mcp-setup --scope user --scie-dir ~/.scopus-tools/index
+scopus-tools mcp-setup --claude-desktop --scie-dir ~/.scopus-tools/index
 ```
 
 自分の絶対パスを解決し、`.env` や環境変数から API キーを読んで登録します。
@@ -686,11 +703,14 @@ python -c "import os; from dotenv import load_dotenv; load_dotenv(); print(bool(
 
 よくある原因は順に:
 
-1. **コマンドが絶対パスでない。** MCP クライアントはシェルを経由しないので、
+1. **`~/Documents` 等に置いた実行ファイルを登録している。** ログに
+   `PermissionError ... pyvenv.cfg` が出ていればこれです。TCC 保護外
+   (`uv tool install` の `~/.local`)に入れ直してください
+2. **コマンドが絶対パスでない。** MCP クライアントはシェルを経由しないので、
    venv の有効化も `PATH` も引き継がれません。`which scopus-tools` の結果をそのまま使う
-2. **MCP SDK が入っていない。** `pip install -e ".[mcp]"` または
+3. **MCP SDK が入っていない。** `pip install -e ".[mcp]"` または
    `uv tool install "scopus_tools[mcp] @ ."`(SDK は Python 3.10 以上、本体は 3.12 以上)
-3. 独自にツールを追加した場合、stdout に `print()` していないか。
+4. 独自にツールを追加した場合、stdout に `print()` していないか。
    stdout は JSON-RPC 専用で、1 行でも混ざるとハンドシェイクが壊れます
 
 登録せずに手で確かめるなら、次を実行して数秒固まれば(= 入力待ち)正常です:
