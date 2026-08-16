@@ -50,6 +50,8 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 - MCP 経由でのデータ取得と、プロジェクト単位(**プロジェクト → 複数研究者**)の結果永続化
 - SQLite によるレスポンスキャッシュ(Scopus のクォータ節約)、レート制限の自動制御、
   取得日のずれの警告
+- 取得が途中で切れた場合の検出(切り詰めた論文リストを完全な業績として扱わない)
+- MCP クライアントへの登録の自動化(`mcp-setup`)
 
 ---
 
@@ -161,27 +163,19 @@ CLI と同じ内部ロジックを、ホスト側モデルから呼べる形で�
 `scopus-tools` がそのまま MCP サーバになります(`scopus-tools mcp`)。
 「インストール」にあたるのは **MCP クライアント側に起動コマンドを登録すること**だけです。
 
-登録する前に、次の 2 点を押さえてください。**ここを外すとほぼ確実に動きません。**
+登録する前に、次の 3 点を押さえてください。**ここを外すとほぼ確実に動きません。**
 
 1. **絶対パスで指定する。** MCP クライアントはあなたのシェルを経由せずにプロセスを
    起動するので、venv の有効化も `PATH` も引き継がれません。`scopus-tools` とだけ
    書いても見つかりません
 2. **API キーは登録時に明示的に渡す。** 同じ理由でシェルの `export` は届きません。
-   `.env` は「実行時のカレントディレクトリ」または「パッケージの位置」から探されますが、
-   MCP クライアントが設定するカレントディレクトリは環境によって違うので、
-   **登録時に環境変数として渡すのが確実**です
-
-> **macOS で最重要**: `~/Documents` / `~/Desktop` / `~/Downloads` は TCC
-> (プライバシー保護)の対象で、**Claude Desktop はそこを読めません**。リポジトリの
-> `.venv` を直接登録すると `pyvenv.cfg` すら読めず、Python が起動する前に落ちます:
->
-> ```
-> PermissionError: [Errno 1] Operation not permitted: '.../.venv/pyvenv.cfg'
-> ```
->
-> ターミナル経由の Claude Code は権限があるため通ってしまい、気付きにくい罠です。
-> **実行ファイルも索引 CSV も TCC 保護外に置いてください。**
-> `mcp-setup` はこれを検出して登録を拒否します。
+   MCP クライアントが設定するカレントディレクトリは環境によって違うため、
+   `.env` に頼らず**登録時に環境変数として渡すのが確実**です
+3. **macOS では TCC 保護外に置く。** `~/Documents` / `~/Desktop` / `~/Downloads` は
+   プライバシー保護の対象で、**Claude Desktop はそこを読めません**。リポジトリの
+   `.venv` を直接登録すると `pyvenv.cfg` すら読めず、Python が起動する前に落ちます
+   (`PermissionError: ... pyvenv.cfg`)。実行ファイルも索引 CSV も保護外に置いてください。
+   `mcp-setup` はこれを検出して登録を拒否します(`--allow-protected-paths` で上書き可)
 
 #### 方法 A: `mcp-setup` に任せる(推奨)
 
@@ -201,17 +195,20 @@ scopus-tools mcp-setup --claude-desktop --scie-dir ~/.scopus-tools/index
 自分の絶対パスを解決し、`.env` や環境変数から API キーを読んで登録します。
 **鍵をどのファイルに平文で書いたかは実行時に必ず表示されます。**
 
-```bash
-scopus-tools mcp-setup --print              # 何も書かずに内容を確認(鍵は伏せて表示)
-scopus-tools mcp-setup --claude-desktop     # Claude Desktop の設定に書く
-scopus-tools mcp-setup --status             # 現在の登録を確認
-scopus-tools mcp-setup --remove             # 登録を解除
-scopus-tools mcp-setup --no-keys            # 鍵を埋め込まない
-scopus-tools mcp-setup --fix-permissions    # .env が 644 なら 600 に直す
-```
+| フラグ | 内容 |
+|---|---|
+| `--claude-code` | Claude Code に登録(既定)。`claude mcp add` を呼ぶ |
+| `--claude-desktop` | `claude_desktop_config.json` に書く |
+| `--scope local\|user\|project` | Claude Code のスコープ。**既定は `local`(そのディレクトリのみ)** |
+| `--name NAME` | サーバ名(既定 `scopus`) |
+| `--print` | 何も書かずに内容を表示(鍵は伏せる) |
+| `--status` / `--remove` | 現在の登録を確認 / 解除 |
+| `--no-keys` | API キーを埋め込まない |
+| `--fix-permissions` | `.env` が他人から読める権限なら 600 に直す |
+| `--allow-protected-paths` | TCC 保護配下でも登録を強行する |
+| `--scie-dir` / `--scie-list` / `--projects-dir` | `mcp` サブコマンドへ素通しする |
 
-`--scope` の既定は `local`(そのディレクトリのみ)です。**どこからでも使うなら
-`--scope user`** を付けてください。
+グローバルフラグの `--cache-db` も登録内容に引き継がれます。
 
 Claude Desktop の設定を書き換えるときは `.bak` を取り、**書いた後に読み直して
 既存の設定が 1 つも失われていないことを検証**します(失われていたら書き戻して中止)。
@@ -249,14 +246,7 @@ claude mcp add scopus -- docker run -i --rm --env-file /path/to/.env \
 
 `-i` が必須です(MCP は stdin/stdout でやり取りするため)。
 
-#### 登録スコープ
-
-`claude mcp add` の既定は `--scope local`(そのディレクトリでのみ有効)です。
-どこからでも使いたい場合は `--scope user` を付けてください。
-
-#### Claude Desktop の場合
-
-`claude_desktop_config.json` に直接書きます:
+#### Claude Desktop に手で書く場合
 
 ```json
 {
@@ -291,7 +281,7 @@ Claude Code から `/mcp` でツール一覧(14 個)が見えれば成功です�
 
 ### Scopus API キー (`SCOPUS_API_KEY`)
 
-論文・著者検索に必須(`kaken-search` / `kaken-summary` 以外の全コマンドで必要)。
+論文・著者検索に必須(`search` / `stats` / `summary` / `papers` / `batch`)。
 
 1. [Elsevier Developer Portal](https://dev.elsevier.com/) にアクセスしてアカウント登録
 2. **My API Key** から新規キーを発行
@@ -340,6 +330,7 @@ CLI 起動時に `.env` が無くてもシェルの環境変数(`export SCOPUS_A
 | `search`, `stats`, `summary`, `papers`, `batch` | 必須 | — |
 | `kaken-search`, `kaken-summary` | — | 必須 |
 | `mcp` | (起動時は不要) | (KAKEN ツールを使う時に必要) |
+| `mcp-setup`, `cache` | 不要 | 不要 |
 
 CLI は起動時に必須キーを自動チェックし、未設定なら即座にエラーで終了します。
 MCP サーバはキーが無くても起動し、該当ツールの呼び出し時にエラーを返します。
@@ -389,8 +380,8 @@ scopus-tools search --input authors.csv --output author_ids.csv
 出力 CSV: `Name`, `Scopus ID`, `Affiliation` の 3 列。
 
 > **クォータ注**: Author Search は **週 5,000 件・2 req/秒** と Elsevier の中で最も厳しい枠です。
-> 以前は姓名の順序を当てるため 1 検索で 2 リクエスト投げていましたが、現在は 1 リクエストです。
-> 外した場合は姓名を入れ替えて呼び直してください(MCP ではモデルが自動で判断します)。
+> 1 検索あたり 1 リクエストなので、姓名の順序を外したときは入れ替えて呼び直してください
+> (MCP ではモデルが自動で判断します)。`--try-both` は 2 リクエスト消費します。
 
 ### `stats` — 年範囲ごとの集計
 
@@ -408,9 +399,15 @@ scopus-tools summary 12345678,87654321
 scopus-tools summary 12345678 --years 2021-2025
 scopus-tools summary --input author_ids.csv --output reports.txt  # CSV 一括処理
 scopus-tools summary 12345678 --format json --output summary.json  # JSON 出力
+scopus-tools summary 12345678 --scie-list index/*.csv              # WoS 収録数も集計
 ```
 
 研究歴 / 引用指標 / 評価期間集計 / 被引用上位 5 件を出力。
+`--scie-list` を渡すと、全期間と評価期間それぞれの WoS 収録論文数と
+その筆頭著者数が加わります。
+
+取得が Scopus 側の都合で完結しなかった場合は stderr に警告が出ます
+(論文数・被引用数が過小に出るため、完全な業績として扱わないでください)。
 
 ### `papers` — 期間内の論文一覧
 
@@ -452,6 +449,18 @@ scopus-tools kaken-summary 80401243 --format json --output grants.json
 
 役割別・種目別の件数、配分額合計、課題一覧を表示。
 `--role principal_investigator` で代表者のみに絞れます。
+
+### `cache` — キャッシュの運用
+
+```bash
+scopus-tools cache stats     # 件数・容量・API 別・クォータ残量
+scopus-tools cache list      # エントリ一覧(--api / --older-than / --limit)
+scopus-tools cache clear     # 削除(--api / --older-than / --yes)
+scopus-tools cache vacuum    # DB を圧縮
+scopus-tools cache path      # DB のパスを表示
+```
+
+詳細は [キャッシュとクォータ セクション](#キャッシュとクォータ) を参照。
 
 ### `mcp-setup` — MCP クライアントへの登録
 
@@ -525,18 +534,10 @@ MCP でも同じ情報が `as_of` / `as_of_note` として全取得ツールの�
 `read_project` / `save_comparison` は取得日がそろっていなければ `as_of_warning` を返します
 (**警告のみで、保存は拒否しません**)。
 
-### 差分取得はしない(調査済み)
+### 差分取得はしません
 
-「更新分だけ取り直す」ことは実 API で検証したうえで**採用していません**:
-
-- `RECENT(30)` は **200 が返るのに件数が絞られない**(黙って無視される)
-- `LOAD-DATE AFT yyyymmdd` は動作する(API ドキュメントには記載なし)。
-  実測では 30 日で `LOAD-DATE` が 28 件動いた一方 `ORIG-LOAD-DATE` は 0 件で、
-  既存レコードの更新を追ってはいる
-- ただし **被引用数の変化を捉える保証がドキュメントに無い**。捉えていなければ
-  「変化なし」と誤判定し、古い被引用数のまま評価してしまう
-- そもそも論文 244 本の再取得は **10 リクエスト**(週 20,000 のうち)。
-  週に約 2,000 人分を取り直せる計算で、クォータは制約になっていない
+Scopus には被引用数の変化を検出する手段が無いため、更新分だけ取り直すことはできません。
+再取得は常に全件です(論文 244 本で 10 リクエスト、週 20,000 の枠なので実害はありません)。
 
 ### レート制限
 
@@ -550,11 +551,12 @@ MCP でも同じ情報が `as_of` / `as_of_note` として全取得ツールの�
 ### 運用コマンド
 
 ```bash
-scopus-tools cache stats                 # 件数・容量・API 別・クォータ残量
-scopus-tools cache list --older-than 30  # 古いエントリを一覧
-scopus-tools cache clear --api scopus_search
-scopus-tools cache vacuum
-scopus-tools cache path
+scopus-tools cache stats                            # 件数・容量・API 別・クォータ残量
+scopus-tools cache list --older-than 30 --limit 20   # 古いエントリを一覧
+scopus-tools cache clear --api scopus_search --yes   # 種別を指定して削除(--yes で確認省略)
+scopus-tools cache clear --older-than 90
+scopus-tools cache vacuum                           # DB を圧縮
+scopus-tools cache path                             # DB のパスを表示
 
 scopus-tools --refresh summary 12345678  # キャッシュを無視して取り直す
 scopus-tools --offline summary 12345678  # キャッシュのみ(通信しない)
@@ -592,7 +594,7 @@ GitHub Container Registry (GHCR) で公式イメージを配布しています
 ```bash
 docker pull ghcr.io/huidsp/scopus-tools:latest   # 最新リリース
 docker pull ghcr.io/huidsp/scopus-tools:main     # main 追随版
-docker pull ghcr.io/huidsp/scopus-tools:0.5.0    # バージョン固定
+docker pull ghcr.io/huidsp/scopus-tools:0.6.0    # バージョン固定
 ```
 
 ### MCP サーバとして
@@ -636,12 +638,12 @@ docker run --rm --env-file .env -v "$PWD:/work" -w /work \
 | トリガー | publish されるタグ |
 |---|---|
 | `main` への push | `:main`, `:sha-<short>` |
-| `v*` タグの push (例: `v0.5.0`) | `:0.5.0`, `:0.5`, `:latest` |
+| `v*` タグの push (例: `v0.6.0`) | `:0.6.0`, `:0.6`, `:latest` |
 | Pull Request | (ビルドのみ、push なし) |
 
 ```bash
-git tag v0.5.0
-git push origin v0.5.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 ---
@@ -700,8 +702,8 @@ pyproject.toml
 
 ### `SCOPUS_API_KEY is not set` で即終了
 
-`.env` がリポジトリルートにあること、`SCOPUS_API_KEY=xxx` の書式(クォート不要)に
-なっていることを確認してください。読み込みチェック:
+`.env` は**実行時のカレントディレクトリ**とパッケージの位置の両方から探されます。
+`SCOPUS_API_KEY=xxx` の書式(クォート不要)になっていることを確認してください。読み込みチェック:
 
 ```bash
 python -c "import os; from dotenv import load_dotenv; load_dotenv(); print(bool(os.getenv('SCOPUS_API_KEY')))"
