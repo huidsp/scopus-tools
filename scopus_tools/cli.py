@@ -157,7 +157,7 @@ def main():
     cache_group.add_argument("--stale-days", dest="stale_days", type=int, metavar="N",
                              default=argparse.SUPPRESS,
                              help="Warn when cached data is older than N days (default: per API — "
-                                  "scopus_search 7, author lookups 90, kaken_project 30). "
+                                  "scopus_search 30, author lookups 90, kaken_project 30). "
                                   "Nothing is auto-refetched; this only controls the warning.")
     cache_group.add_argument("--stale-days-for", dest="stale_days_for", action="append",
                              metavar="API=N", default=argparse.SUPPRESS,

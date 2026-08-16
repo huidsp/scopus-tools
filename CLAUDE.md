@@ -131,8 +131,10 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
 - **`asof`** — freshness and as-of-date consistency. **Nothing ever auto-expires**: for
   personnel review the compared researchers' data must share a fetch date, so refetching is
   explicit (`--refresh` / `refresh=true`) and staleness is only *warned* about.
-  - Thresholds are **per API family** (`DEFAULT_STALE_DAYS`): `scopus_search` 7 days (citation
-    counts move), author/researcher lookups 90 (name→ID mappings barely change). `StalePolicy`
+  - Thresholds are **per API family** (`DEFAULT_STALE_DAYS`): `scopus_search` 30 days
+    (citation counts move, but only meaningfully month over month), author/researcher lookups
+    90 (name→ID mappings barely change). Comparison-set consistency is guarded separately by
+    `SPREAD_TOLERANCE_DAYS` (1 day), so this threshold does not need to be short. `StalePolicy`
     resolves defaults < `$SCOPUS_TOOLS_STALE_DAYS` < `--stale-days` < `--stale-days-for API=N`.
   - `spread()` flags a comparison set whose fetch dates differ by more than a day. An unknown
     fetch date is never treated as fresh.
@@ -315,6 +317,17 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
   MCP registration pointing at a hardcoded `/Applications/...` path that is no better than the
   `~/.local/bin/scopus-tools` you get from `uv tool install`. Distribution to people without
   Python is already answered by the Docker image. Don't revisit this without a new reason.
+- **Incremental / delta fetching from Scopus was investigated and rejected.** Measured against
+  the live API on a 244-paper author:
+  - `RECENT(30)` is **silently ignored** — it returns HTTP 200 with the unfiltered count. A
+    query that looks like it filters but does not is worse than one that errors.
+  - `LOAD-DATE AFT yyyymmdd` **does** work (undocumented in the API search tips) and is
+    distinct from `ORIG-LOAD-DATE`: over 30 days, 28 records had a new LOAD-DATE while 0 had a
+    new ORIG-LOAD-DATE, so LOAD-DATE tracks updates to existing records.
+  - **But nothing documents that it covers citation-count changes**, and a false "nothing
+    changed" would silently feed stale citation counts into a personnel evaluation.
+  - The quota does not justify the risk anyway: re-fetching 244 papers is 10 requests out of
+    20,000/week, i.e. ~2,000 full researcher re-fetches per week. Just re-fetch.
 - API keys: `.env` (chmod 600) or the MCP client's config `env` (those files are already 600).
   **Not** the macOS Keychain — an unsigned CLI spawned by varying parent processes hits
   repeated authorization dialogs, and it would be macOS-only.

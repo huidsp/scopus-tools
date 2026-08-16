@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 
 # 種別ごとの既定しきい値(日)。いずれも上書き可能。
 DEFAULT_STALE_DAYS = {
-    "scopus_search":           7,    # 被引用数・論文数が動く。評価の中核なので短く
+    "scopus_search":          30,    # 被引用数・論文数が動く。ただし月単位でしか
+                                    # 意味のある変化をしないので 30 日
+                                    # (比較セットの取得日ずれは SPREAD_TOLERANCE_DAYS
+                                    #  が別途 1 日で見張るので、ここを短くする必要はない)
     "scopus_author_search":   90,    # 名前 → Scopus ID の対応はほぼ変わらない
     "scopus_author_retrieval": 90,   # 著者の姓名。ほぼ変わらない
     "kaken_project":          30,    # 採択課題は年度単位で増える

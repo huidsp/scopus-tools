@@ -15,7 +15,7 @@ def _iso(days_ago):
 class TestStalePolicy:
     def test_defaults_are_per_api(self):
         p = asof.StalePolicy()
-        assert p.days_for("scopus_search") == 7
+        assert p.days_for("scopus_search") == 30
         assert p.days_for("scopus_author_search") == 90
         assert p.days_for("kaken_project") == 30
 
@@ -26,11 +26,11 @@ class TestStalePolicy:
         p = asof.StalePolicy(default=1)
         assert p.days_for("brand_new") == 1
         # 既知の種別は既定表が勝つ(--stale-days-for で個別に変える)
-        assert p.days_for("scopus_search") == 7
+        assert p.days_for("scopus_search") == 30
 
     def test_overrides_win(self):
-        p = asof.StalePolicy(overrides={"scopus_search": 30})
-        assert p.days_for("scopus_search") == 30
+        p = asof.StalePolicy(overrides={"scopus_search": 7})
+        assert p.days_for("scopus_search") == 7
         assert p.days_for("kaken_project") == 30
 
     def test_env_is_read(self, monkeypatch):
@@ -50,7 +50,7 @@ class TestStalePolicy:
 
     def test_invalid_env_is_ignored(self, monkeypatch):
         monkeypatch.setenv("SCOPUS_TOOLS_STALE_DAYS", "nonsense")
-        assert asof.StalePolicy().days_for("scopus_search") == 7
+        assert asof.StalePolicy().days_for("scopus_search") == 30
 
     @pytest.mark.parametrize("raw,expected", [
         (["scopus_search=14"], {"scopus_search": 14}),
@@ -70,14 +70,14 @@ class TestDescribe:
     def test_same_age_differs_by_api(self):
         """同じ経過日数でも種別によって stale 判定が変わる。"""
         policy = asof.StalePolicy()
-        fetched = _iso(30)
+        fetched = _iso(45)
         assert asof.describe(fetched, "scopus_search", policy, now=NOW).stale is True
         assert asof.describe(fetched, "scopus_author_search", policy, now=NOW).stale is False
 
     def test_boundary(self):
         policy = asof.StalePolicy()
-        assert asof.describe(_iso(7), "scopus_search", policy, now=NOW).stale is False
-        assert asof.describe(_iso(8), "scopus_search", policy, now=NOW).stale is True
+        assert asof.describe(_iso(30), "scopus_search", policy, now=NOW).stale is False
+        assert asof.describe(_iso(31), "scopus_search", policy, now=NOW).stale is True
 
     def test_unknown_fetch_date_is_not_treated_as_fresh(self):
         entry = asof.describe(None, "scopus_search", asof.StalePolicy(), now=NOW)
@@ -86,9 +86,9 @@ class TestDescribe:
         assert "unknown" in entry.note().lower()
 
     def test_note_mentions_threshold_and_api(self):
-        entry = asof.describe(_iso(20), "scopus_search", asof.StalePolicy(), now=NOW)
+        entry = asof.describe(_iso(45), "scopus_search", asof.StalePolicy(), now=NOW)
         note = entry.note()
-        assert "scopus_search" in note and "7-day" in note and "refresh=true" in note
+        assert "scopus_search" in note and "30-day" in note and "refresh=true" in note
 
     def test_fresh_fetch_note(self):
         entry = asof.describe(_iso(0), "scopus_search", asof.StalePolicy(),
@@ -98,7 +98,7 @@ class TestDescribe:
     def test_to_dict_shape(self):
         d = asof.describe(_iso(3), "scopus_search", asof.StalePolicy(), now=NOW).to_dict()
         assert set(d) == {"fetched_at", "cached", "age_days", "stale", "api", "threshold_days"}
-        assert d["threshold_days"] == 7
+        assert d["threshold_days"] == 30
 
 
 class TestSpread:
