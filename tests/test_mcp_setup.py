@@ -318,3 +318,40 @@ class TestEnvFileLocations:
         (state / ".env").write_text("SCOPUS_API_KEY=from-user-env\n")
         cli._load_env_files()
         assert os.environ["SCOPUS_API_KEY"] == "from-user-env"
+
+
+class TestReRegistration:
+    """設定を変えて登録し直すのは普通の操作。既存があっても失敗してはいけない。"""
+
+    def test_existing_server_is_replaced_not_rejected(self):
+        from unittest.mock import MagicMock
+        fail = MagicMock(returncode=1, stdout="",
+                         stderr="MCP server scopus already exists in user config")
+        ok = MagicMock(returncode=0, stdout="Added stdio MCP server scopus", stderr="")
+        removed = MagicMock(returncode=0, stdout="Removed", stderr="")
+
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", side_effect=[fail, removed, ok]) as run:
+            res = mcp_setup.run_claude_code(_entry(), scope="user")
+
+        assert res["replaced"] is True
+        # add → remove → add の順で呼ばれる
+        assert [c.args[0][1:3] for c in run.call_args_list] == [
+            ["mcp", "add"], ["mcp", "remove"], ["mcp", "add"]]
+
+    def test_first_registration_does_not_call_remove(self):
+        from unittest.mock import MagicMock
+        ok = MagicMock(returncode=0, stdout="Added", stderr="")
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", return_value=ok) as run:
+            res = mcp_setup.run_claude_code(_entry())
+        assert res["replaced"] is False
+        assert run.call_count == 1
+
+    def test_other_failures_still_raise(self):
+        from unittest.mock import MagicMock
+        fail = MagicMock(returncode=1, stdout="", stderr="something else went wrong")
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", return_value=fail):
+            with pytest.raises(RuntimeError, match="something else"):
+                mcp_setup.run_claude_code(_entry())

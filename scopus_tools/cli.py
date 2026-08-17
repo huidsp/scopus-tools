@@ -562,7 +562,8 @@ def _mcp_setup_command(args, parser):
                 print(f"  backup: {res['backup']}")
         else:
             res = mcp_setup.run_claude_code(entry, name=args.name, scope=args.scope)
-            print(f"Registered MCP server '{args.name}' with Claude Code"
+            action = "Updated" if res.get("replaced") else "Registered"
+            print(f"{action} MCP server '{args.name}' with Claude Code"
                   f"{f' (scope: {args.scope})' if args.scope else ''}")
             if res["output"]:
                 print(f"  {res['output']}")

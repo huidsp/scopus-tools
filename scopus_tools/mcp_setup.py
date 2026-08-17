@@ -277,17 +277,30 @@ def claude_code_command(entry, name=DEFAULT_SERVER_NAME, scope=None):
 
 
 def run_claude_code(entry, name=DEFAULT_SERVER_NAME, scope=None):
+    """Claude Code に登録する。**再実行すると更新**される(既存があっても失敗しない)。
+
+    `claude mcp add` には上書きオプションが無く、同名が既にあると終了コード 1 で
+    "already exists" を返す。設定を変えて登録し直すのは普通の操作なので、
+    その場合だけ remove してから add し直す(Claude Desktop 側と挙動を揃える)。
+    """
     if shutil.which("claude") is None:
         raise RuntimeError(
             "The `claude` CLI was not found on PATH. Install Claude Code, or use "
             "--print and run the command yourself.")
     cmd = claude_code_command(entry, name=name, scope=scope)
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    replaced = False
+
+    if proc.returncode != 0 and "already exists" in (proc.stderr or proc.stdout or "").lower():
+        remove_claude_code(name, scope=scope)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        replaced = True
+
     if proc.returncode != 0:
         raise RuntimeError(
             f"`claude mcp add` failed (exit {proc.returncode}): "
             f"{(proc.stderr or proc.stdout).strip()}")
-    return {"command": cmd, "output": (proc.stdout or "").strip()}
+    return {"command": cmd, "output": (proc.stdout or "").strip(), "replaced": replaced}
 
 
 def remove_claude_code(name=DEFAULT_SERVER_NAME, scope=None):

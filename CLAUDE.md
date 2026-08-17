@@ -289,7 +289,10 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     lost** — restoring from the backup and aborting if any were. Corrupt JSON is never
     overwritten. Keep these guarantees; `tests/test_mcp_setup.py` pins them.
   - Claude Code goes through the `claude mcp add` CLI rather than editing its config, so
-    scope handling stays with the official implementation.
+    scope handling stays with the official implementation. `claude mcp add` has no overwrite
+    flag and exits 1 with "already exists", so `run_claude_code` removes and re-adds in that
+    one case — re-running with changed settings is normal, and the Claude Desktop path
+    already replaced in place.
   - **`tcc_warnings()` refuses to register a path under `~/Documents`, `~/Desktop` or
     `~/Downloads`.** Those are TCC-protected on macOS and a GUI client cannot read them: a
     venv there dies with `PermissionError: ... pyvenv.cfg` before Python finishes starting.
