@@ -22,13 +22,16 @@ import sys
 
 import requests
 
-from scopus_tools import (api, asof, core, httpcache, kaken, linking, projects,
-                          scie, wos)
+from scopus_tools import (api, asof, core, httpcache, jcr, kaken, linking,
+                          projects, scie, wos)
 
 logger = logging.getLogger(__name__)
 
 # 起動時に読み込む WoS インデックス集合 {ラベル: ISSN集合}
 _INDEX_SETS = {}
+
+# 起動時に読み込む JCR 指標表 {正規化ISSN: {jif, quartile, ...}}
+_JCR_TABLE = {}
 
 # プロジェクト JSON の保存先(--projects-dir。None なら projects の既定)
 _PROJECTS_DIR = None
@@ -357,6 +360,8 @@ def author_summary(author_ids, year_range=None, refresh=False):
     papers = fetched.papers
     if _INDEX_SETS:
         scie.annotate_papers_indexes(papers, _INDEX_SETS)
+    if _JCR_TABLE:
+        jcr.annotate_papers_jcr(papers, _JCR_TABLE)
     report = core.summarize_papers(papers, year_range=years)
     payload = {
         "scopus_ids": ids,
@@ -365,6 +370,11 @@ def author_summary(author_ids, year_range=None, refresh=False):
         "wos_indexes_loaded": sorted(_INDEX_SETS.keys()),
         "summary": report,
     }
+    if _JCR_TABLE:
+        # 期間内の論文だけを対象にする(全期間の IF 合計は評価対象と噛み合わない)
+        recent = [p for p in papers if years[0] <= p.get("year", 0) <= years[1]]
+        payload["jcr_summary"] = jcr.summarize_jcr(recent)
+        payload["jcr_summary"]["year_range"] = list(years)
     _attach_completeness(payload, fetched)
     return _with_as_of(payload, records, "scopus_search")
 
@@ -402,6 +412,8 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
     papers = fetched.papers
     if _INDEX_SETS:
         scie.annotate_papers_indexes(papers, _INDEX_SETS)
+    if _JCR_TABLE:
+        jcr.annotate_papers_jcr(papers, _JCR_TABLE)
         if scie_only:
             papers = [p for p in papers if p.get("wos_indexes")]
 
@@ -681,6 +693,8 @@ def wos_author_documents(researcher_id=None, name=None, organization=None,
     papers = fetched.papers
     if _INDEX_SETS:
         scie.annotate_papers_indexes(papers, _INDEX_SETS)
+    if _JCR_TABLE:
+        jcr.annotate_papers_jcr(papers, _JCR_TABLE)
         if scie_only:
             papers = [p for p in papers if p.get("wos_indexes")]
             fetched.papers = papers
@@ -757,10 +771,11 @@ def build_server():
     return server
 
 
-def run(projects_dir=None, scie_list=None, scie_dir=None, cache_db=None,
+def run(projects_dir=None, scie_list=None, scie_dir=None,
+        jcr_list=None, jcr_dir=None, cache_db=None,
         no_cache=False, stale_policy=None, timeout=None):
     """stdio トランスポートで MCP サーバを起動する。"""
-    global _INDEX_SETS, _PROJECTS_DIR, _HTTP_CONTEXT, _STALE_POLICY
+    global _INDEX_SETS, _JCR_TABLE, _PROJECTS_DIR, _HTTP_CONTEXT, _STALE_POLICY
     _PROJECTS_DIR = projects_dir
     _STALE_POLICY = stale_policy or asof.StalePolicy()
     _HTTP_CONTEXT = httpcache.build_context(
@@ -771,5 +786,13 @@ def run(projects_dir=None, scie_list=None, scie_dir=None, cache_db=None,
                     ", ".join(f"{k}({len(v)})" for k, v in _INDEX_SETS.items()))
     else:
         logger.info("No WoS index CSV found (scie_dir=%s)", scie_dir)
+
+    _JCR_TABLE = jcr.discover_jcr_table(jcr_list=jcr_list, jcr_dir=jcr_dir)
+    if _JCR_TABLE:
+        years = sorted({r.get("jcr_year") for r in _JCR_TABLE.values() if r.get("jcr_year")})
+        logger.info("Loaded JCR metrics for %d ISSNs (JCR %s)",
+                    len(_JCR_TABLE), ", ".join(str(y) for y in years) or "year unknown")
+    else:
+        logger.info("No JCR CSV found (jcr_dir=%s)", jcr_dir)
     print(f"scopus-tools MCP server starting (tools: {len(_TOOLS)})", file=sys.stderr)
     build_server().run(transport="stdio")

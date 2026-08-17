@@ -6,8 +6,8 @@ import os
 import subprocess
 import sys
 from dotenv import find_dotenv, load_dotenv
-from scopus_tools import (api, asof, cachedb, config, core, httpcache, kaken,
-                          mcp_setup, scie, utils, wos)
+from scopus_tools import (api, asof, cachedb, config, core, httpcache, jcr,
+                          kaken, mcp_setup, scie, utils, wos)
 
 
 # どのサブコマンドにどの環境変数が必須か。
@@ -227,6 +227,8 @@ def main():
                        help="Output format (default: text)")
     sum_p.add_argument("--output", default=None,
                        help="Write to file path instead of stdout")
+    sum_p.add_argument("--jcr-list", nargs="+", default=None, metavar="CSV",
+                       help="One or more JCR export CSVs (see `papers --jcr-list`)")
     sum_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
                        help="One or more Web of Science journal lists (see `papers --scie-list`). "
                             "When given, the summary adds SCI(SCIE) paper counts and their "
@@ -242,6 +244,9 @@ def main():
                           help="Output format (default: text)")
     papers_p.add_argument("--output", default=None,
                           help="Write to file path instead of stdout (required for --format csv)")
+    papers_p.add_argument("--jcr-list", nargs="+", default=None, metavar="CSV",
+                          help="One or more JCR export CSVs; annotates each paper with "
+                               "the journal's Impact Factor and JIF quartile")
     papers_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
                           help="One or more Web of Science journal lists (CSV with ISSN columns, or "
                                "one ISSN per line). The index name is derived from each filename's "
@@ -315,6 +320,12 @@ def main():
     mcp_p.add_argument("--projects-dir", dest="projects_dir", default=None,
                        help="Directory to store project JSON files "
                             "(default: ~/.scopus-tools/projects/)")
+    mcp_p.add_argument("--jcr-list", nargs="+", default=None, metavar="CSV",
+                       help="One or more JCR export CSVs (Impact Factor / quartile).")
+    mcp_p.add_argument("--jcr-dir", dest="jcr_dir", default=None, metavar="DIR",
+                       help="Directory of JCR export CSVs; every *.csv in it is loaded. "
+                            "With neither --jcr-list nor --jcr-dir, 'JCR_*.csv' and "
+                            "'jcr/*.csv' in the launch directory are auto-detected.")
     mcp_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
                        help="One or more Web of Science journal lists (see `papers --scie-list`).")
     mcp_p.add_argument("--scie-dir", dest="scie_dir", default=None, metavar="DIR",
@@ -349,6 +360,8 @@ def main():
                               "~/Downloads (macOS TCC). A GUI client will fail to start it.")
     setup_p.add_argument("--fix-permissions", dest="fix_permissions", action="store_true",
                          help="chmod 600 the .env file if it is readable by others")
+    setup_p.add_argument("--jcr-dir", dest="setup_jcr_dir", default=None, metavar="DIR",
+                         help="Passed through to `mcp --jcr-dir`")
     setup_p.add_argument("--scie-dir", dest="setup_scie_dir", default=None, metavar="DIR",
                          help="Passed through to `mcp --scie-dir`")
     setup_p.add_argument("--scie-list", dest="setup_scie_list", nargs="+", default=None,
@@ -788,6 +801,7 @@ def _dispatch(args, parser, http_ctx):
     elif args.command == "summary":
         client = api.ScopusClient(context=http_ctx)
         index_sets = scie.load_index_sets(args.scie_list) if args.scie_list else None
+        jcr_table = jcr.load_jcr_tables(args.jcr_list) if args.jcr_list else None
         targets = _collect_targets(args, parser)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         is_batch = args.input is not None
@@ -808,6 +822,8 @@ def _dispatch(args, parser, http_ctx):
                                             records))
             if index_sets is not None:
                 scie.annotate_papers_indexes(papers, index_sets)
+            if jcr_table:
+                jcr.annotate_papers_jcr(papers, jcr_table)
             report = core.summarize_papers(papers, year_range=year_range)
             results.append((s_ids, first, last, report, papers))
         if is_batch:
@@ -841,6 +857,7 @@ def _dispatch(args, parser, http_ctx):
             parser.error("papers: --scie-only requires --scie-list")
         client = api.ScopusClient(context=http_ctx)
         index_sets = scie.load_index_sets(args.scie_list) if args.scie_list else None
+        jcr_table = jcr.load_jcr_tables(args.jcr_list) if args.jcr_list else None
         targets = _collect_targets(args, parser)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         start_y, end_y = year_range
@@ -863,6 +880,8 @@ def _dispatch(args, parser, http_ctx):
                                             records))
             if index_sets is not None:
                 scie.annotate_papers_indexes(papers, index_sets)
+            if jcr_table:
+                jcr.annotate_papers_jcr(papers, jcr_table)
                 if args.scie_only:
                     papers = [p for p in papers if p.get("wos_indexes")]
             results.append((s_ids, first, last, papers))
@@ -944,6 +963,8 @@ def _dispatch(args, parser, http_ctx):
                 projects_dir=args.projects_dir,
                 scie_list=args.scie_list,
                 scie_dir=args.scie_dir,
+                jcr_list=args.jcr_list,
+                jcr_dir=args.jcr_dir,
                 cache_db=args.cache_db,
                 no_cache=args.no_cache,
                 stale_policy=args.stale_policy,

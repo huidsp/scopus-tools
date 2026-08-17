@@ -251,6 +251,57 @@ scopus-tools wos --rid D-0000-2011 --years 2021-2025
 
 MCP ツールは応答に必ず `caveat` を付け、どちらの方法を使ったかとその弱点をモデルに伝えます。
 
+### Impact Factor / 分位(JCR)
+
+IF と JIF 分位は **API では取れません**。WoS Starter の `/journals` は JCR ページへの
+**リンクだけ**を返し、数値は別契約の Journals API が必要です(Starter の鍵で叩くと
+`403 You cannot consume this service`)。そのため Master Journal List と同じく、
+**CSV を手で書き出して読ませます**。
+
+#### CSV の入手
+
+1. [jcr.clarivate.com](https://jcr.clarivate.com) を開く(学内ネットワーク)
+2. **Journals** タブ → 左の **Category** で分野を絞る
+3. 画面上部の**ダウンロードアイコン** → **CSV**
+
+**1 回の書き出しは 600 誌まで**です(全件一括は 2022 年 3 月に廃止)。600 は
+「JCR で最大のカテゴリがちょうど収まる」数なので、**カテゴリごとに 1 ファイル**
+落とせば必ず収まります。ファイルは 1 つのディレクトリにまとめて置いてください。
+
+```bash
+scopus-tools papers <ID> --years 2021-2025 --jcr-list jcr/*.csv
+scopus-tools mcp --jcr-dir ~/.scopus-tools/jcr
+```
+
+`--jcr-list` / `--jcr-dir` を省略した場合、カレントの `JCR_*.csv` と `jcr/*.csv` を
+自動検出します。
+
+#### 付与される値
+
+各論文に `jcr` が付きます:
+
+```json
+{"jif": 13.7, "quartile": "Q1", "jci": 2.5, "jcr_year": 2025,
+ "categories": ["COMPUTER SCIENCE, SOFTWARE ENGINEERING", "..."]}
+```
+
+`author_summary` には `jcr_summary`(分位別件数、IF の中央値・合計・最大)が付きます。
+**平均ではなく中央値**を主に見てください — IF の分布は極端に歪んでおり、
+Nature 系が 1 本あるだけで平均が跳ね上がります。
+
+> **注意**: IF は**雑誌**の指標で、個々の論文の質を表しません。分位は
+> その雑誌が属する複数カテゴリのうち**最良のもの**を代表値にしています
+> (カテゴリ別の内訳は `categories` に残ります)。
+
+#### どのカテゴリを落とせばよいか
+
+手元の業績データで実測したところ、ある 34 名分の論文 3,525 件は **113 カテゴリ**に
+またがっていました。ただし**上位 10 カテゴリで 58%** をカバーします。
+まず主要な 10〜15 カテゴリだけ落として始めるのが現実的です。
+
+なお IF を付けられるのは全体の 4 割程度です。残りは会議録・書籍・廃刊誌など、
+そもそも JCR に IF が無いものです。
+
 ### 登録(インストール)
 
 **MCP サーバ用に別途インストールするものはありません。** `pip` で入れた

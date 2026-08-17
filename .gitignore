@@ -25,6 +25,12 @@ index/
 *(AHCI).csv
 *(ESCI).csv
 
+# JCR(Journal Citation Reports)の書き出し CSV。Clarivate のライセンスデータで、
+# 書き出し時に利用規約に同意しているので再配布しない。jcr/ にまとめる運用。
+jcr/
+JCR_*.csv
+JCR_JournalResults*.csv
+
 # pytest
 .pytest_cache/
 .cache/

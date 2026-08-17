@@ -11,6 +11,8 @@ first-author counts), pulls KAKEN grant histories, and annotates papers with the
 Web of Science index coverage. It ships two frontends:
 
 - A CLI (`scopus-tools`) with 13 subcommands.
+- Journal-level metrics from hand-exported CSVs: Web of Science index coverage
+  (`scie`) and JCR Impact Factor / quartile (`jcr`).
 - An MCP server (`scopus-tools mcp`, stdio) exposing data retrieval plus project persistence.
 
 **This package never calls an LLM over an API.** Evaluation, field inference, and
@@ -283,6 +285,32 @@ Both are injected after the cache key is computed, so neither reaches the DB.
   - Lists are登録制 (Clarivate Master Journal List), one CSV per index, not auto-downloadable;
     pass them via `--scie-list`. Each index is a separate download — a single CSV has no
     per-row index label. The data files are gitignored.
+
+- **`jcr`** — Journal Citation Reports の指標(JIF / 分位 / JCI)を論文に付ける。
+  `scie` が ISSN の**集合**なのに対し、こちらは ISSN → **値**の対応表。
+  - **The metrics are not available from any API we can reach.** WoS Starter's
+    `/journals` returns only a *link* to the JCR record; the numbers need the separate
+    Journals API, which our Starter key gets `403 You cannot consume this service` on.
+    So the CSV is exported by hand from jcr.clarivate.com, like the Master Journal List.
+    **One export is capped at 600 journals**, so exports are per-category.
+  - The real export has six traps, each of which fails *silently* — verified against a
+    live export and pinned in `tests/test_jcr.py`:
+    1. The header is on line 3 (line 1 is a "Journal Data Filtered By:" banner, line 2
+       blank). `_find_header` searches for it rather than skipping a fixed count.
+    2. The last two lines are a copyright/terms notice, dropped explicitly.
+    3. **The `ISSN` column can be the literal string `"N/A"`** (eISSN-only journals).
+       Keying on it collapses every such journal into one entry; the eISSN fallback is
+       mandatory. 92 of 600 journals in the sample export needed it.
+    4. **The JIF/JCI column names embed the year** (`2025 JIF`), so they are matched by
+       suffix; the year is also recovered from them when the banner is absent.
+    5. **One row = one journal × one category**, and the quartile differs per category
+       (a journal was Q1 in three and N/A in a fourth). `quartile` is the best across
+       categories, with the breakdown kept in `categories`.
+    6. Numbers carry thousands separators (`"78,841"`), `%`, and `<0.1` notation.
+  - `summarize_jcr` reports the **median** JIF as well as the sum, because the
+    distribution is heavily skewed — one Nature-family paper moves a mean a long way.
+  - Keep the `jcr` key name and the "journal-level metric" note: JIF describes the
+    journal, not the paper, and a personnel review is exactly where that gets conflated.
 
 - **`utils`** — CSV I/O (`utf-8-sig` output for Excel compatibility), logging setup,
   per-row progress helpers (`progress`, `progress_done`), and the two batch drivers
