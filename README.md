@@ -31,7 +31,6 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 - [CLI リファレンス](#cli-リファレンス)
 - [キャッシュとクォータ](#キャッシュとクォータ)
 - [Web of Science 収録インデックス](#web-of-science-収録インデックス)
-- [Docker での利用](#docker-での利用)
 - [Python API](#python-api)
 - [プロジェクト構成](#プロジェクト構成)
 - [トラブルシューティング](#トラブルシューティング)
@@ -102,7 +101,20 @@ pip install -e ".[mcp,dev]"
 - `[mcp]` — MCP サーバ用(`scopus-tools mcp` を使うなら必須)
 - `[dev]` — `pytest`(テスト実行用)
 
-### 直接インストール(CLI だけ使う場合)
+### 配布・共有(他の人に使ってもらう場合)
+
+`uv` さえ入っていれば 1 コマンドで入ります。隔離環境に入り、パスも安定します。
+
+```bash
+# uv を入れる(未導入の場合)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv tool install "scopus_tools[mcp] @ git+https://github.com/huidsp/scopus-tools.git"
+scopus-tools mcp-setup --scope user      # MCP クライアントへの登録まで自動
+```
+
+`pip` でも入りますが、**MCP として使うなら実行ファイルのパスが安定する
+`uv tool install` を勧めます**(MCP クライアントは絶対パスで起動するため):
 
 ```bash
 pip install "git+https://github.com/huidsp/scopus-tools.git"
@@ -256,18 +268,6 @@ claude mcp add scopus -- "$PWD/.venv/bin/scopus-tools" mcp --scie-dir "$PWD/inde
 
 editable インストール(`pip install -e`)の場合に限り、`.env` はリポジトリ直下から
 自動的に読まれるので `-e` は省略できます。
-
-#### 方法 C: Docker
-
-```bash
-claude mcp add scopus -- docker run -i --rm --env-file /path/to/.env \
-  -v /path/to/index:/data/index:ro \
-  -v /path/to/projects:/data/projects \
-  -v scopus-cache:/data/cache \
-  ghcr.io/huidsp/scopus-tools:latest mcp --scie-dir /data/index
-```
-
-`-i` が必須です(MCP は stdin/stdout でやり取りするため)。
 
 #### Claude Desktop に手で書く場合
 
@@ -614,76 +614,11 @@ Scopus には「どの WoS インデックスに収録されているか」を�
 - リストは登録制で自動ダウンロードできません。インデックスごとに 1 CSV をダウンロードしてください
   (1 つの CSV に複数インデックスの区別は入っていません)。
 - インデックス名はファイル名の括弧内略号から導出します(`... (SCIE).csv` → `SCIE`)。
-- CLI では `--scie-list CSV [CSV ...]`、MCP / Docker では `--scie-dir DIR`
+- CLI では `--scie-list CSV [CSV ...]`、MCP では `--scie-dir DIR`
   (その中の `*.csv` を全部読む)で渡します。
 - どちらも指定しない場合は、起動ディレクトリの `*Citation Index*.csv` と
   `index/*.csv` を自動検出します。
 - データファイルは `.gitignore` 済みです。
-
----
-
-## Docker での利用
-
-ローカルに Python 環境を作らず Docker だけで実行できます。
-GitHub Container Registry (GHCR) で公式イメージを配布しています
-(`linux/amd64` + `linux/arm64` マルチアーキ)。
-
-### GHCR から pull
-
-```bash
-docker pull ghcr.io/huidsp/scopus-tools:latest   # 最新リリース
-docker pull ghcr.io/huidsp/scopus-tools:main     # main 追随版
-docker pull ghcr.io/huidsp/scopus-tools:0.7.0    # バージョン固定
-```
-
-### MCP サーバとして
-
-MCP は stdio なので常駐サービスにはなりません。`-i` を付けて MCP クライアントから起動します:
-
-```bash
-docker run -i --rm --env-file .env \
-  -v "$PWD/index:/data/index:ro" \
-  -v "$PWD/projects:/data/projects" \
-  -v scopus-cache:/data/cache \
-  ghcr.io/huidsp/scopus-tools:latest \
-  mcp --scie-dir /data/index --projects-dir /data/projects
-```
-
-### CLI として
-
-```bash
-docker run --rm --env-file .env ghcr.io/huidsp/scopus-tools:latest \
-  search --name "Hiroyuki Okamura"
-
-# CSV を読み書きする場合は作業ディレクトリをマウント
-docker run --rm --env-file .env -v "$PWD:/work" -w /work \
-  ghcr.io/huidsp/scopus-tools:latest \
-  batch --input author_ids.csv --output summary.csv
-```
-
-### 注意事項
-
-- **Scopus は機関 IP 認証**。Docker ホスト自体が機関ネットワーク(または機関 VPN 接続済み)で
-  ないと、コンテナからも認証が通りません。
-- `.env` は **イメージに焼き込まないでください**(`.dockerignore` で除外済)。
-  必ず `--env-file` で外から渡す運用に。
-- コンテナ内ユーザは UID 1000 (`appuser`)。ホスト側ディレクトリの所有者が違う場合は
-  `chown -R 1000:1000 ./projects` するか `docker run --user "$(id -u):$(id -g)"` で揃えてください。
-
-### メンテナ向け: イメージ公開フロー
-
-`.github/workflows/docker-publish.yml` が以下のタイミングで自動ビルド & GHCR push します:
-
-| トリガー | publish されるタグ |
-|---|---|
-| `main` への push | `:main`, `:sha-<short>` |
-| `v*` タグの push (例: `v0.7.0`) | `:0.7.0`, `:0.7`, `:latest` |
-| Pull Request | (ビルドのみ、push なし) |
-
-```bash
-git tag v0.7.0
-git push origin v0.7.0
-```
 
 ---
 

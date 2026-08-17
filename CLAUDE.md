@@ -74,8 +74,8 @@ CLI subcommands (see `scopus_tools/cli.py`):
 - `cache` — `stats` / `list` / `clear` / `vacuum` / `path`. Touches no network.
 - `mcp` — runs the MCP server over stdio (see `mcp_server`); takes `--projects-dir`,
   `--scie-list CSV [CSV ...]`, and `--scie-dir DIR` (loads every `*.csv` in DIR). With neither
-  scie flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir. The
-  Docker image mounts the index CSVs at `/data/index`. Forces logging to stderr before starting.
+  scie flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir.
+  Forces logging to stderr before starting.
 
 All subcommands also accept the global cache/network flags: `--refresh`, `--offline`,
 `--no-cache`, `--cache-db PATH`, `--timeout SEC`, `--stale-days N`, and the repeatable
@@ -328,9 +328,12 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
   the report text in `utils.print_report_text` is also Japanese. UI strings are not internationalized.
 - The MCP server's stdout is the JSON-RPC channel. If you add a code path reachable from a
   tool, make sure it writes to stderr — a single stray stdout line breaks the handshake.
-- `docker-compose.yml` was removed with the WebUI: MCP is stdio, so there is no long-running
-  service to compose. The Docker image's `CMD` is `["--help"]` and the subcommand is given
-  at `docker run` time.
+- **Docker support was removed in v0.8.0.** The image existed to hand the tool to people
+  without Python, but `uv tool install` covers that in one command and is what the MCP
+  registration wants anyway (a stable absolute path). Running under Docker also meant Docker
+  Desktop had to be up before Claude Desktop could start the server, ~1.6s of container
+  startup per session, and three volumes to mount correctly. Images already on GHCR stay
+  published; they are simply no longer updated.
 - **Packaging as a macOS `.app` was considered and rejected** (v0.6.0). The sibling project
   `../Secretary` does bundle one, but every reason it needs to — a WKWebView GUI, TCC/Full
   Disk Access attributed to the bundle, a self-signed cert purely to stop ad-hoc cdhash churn
@@ -338,8 +341,9 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
   costs are real and documented in that repo: no notarization (Gatekeeper blocks it on other
   Macs), no auto-update, no CI, rebuilds silently breaking the launchd registration, and an
   MCP registration pointing at a hardcoded `/Applications/...` path that is no better than the
-  `~/.local/bin/scopus-tools` you get from `uv tool install`. Distribution to people without
-  Python is already answered by the Docker image. Don't revisit this without a new reason.
+  `~/.local/bin/scopus-tools` you get from `uv tool install`. Handing the tool to someone else
+  is answered by `uv tool install ... @ git+https://...` — asking them to install uv is a far
+  smaller imposition than notarization and a release pipeline. Don't revisit without a new reason.
 - **Incremental / delta fetching from Scopus was investigated and rejected.** Measured against
   the live API on a 244-paper author:
   - `RECENT(30)` is **silently ignored** — it returns HTTP 200 with the unfiltered count. A
