@@ -30,7 +30,11 @@ and CLI flag names stay in English.
   **pandas was removed in v0.6.0** — it and numpy were 104MB of a 174MB install for what
   amounted to four CSV helpers. CSV I/O is stdlib `csv` now (16MB CLI / 54MB with MCP).
   Don't reintroduce pandas for CSV work.
-- A `.env` at the repo root is loaded by `cli.main` via `load_dotenv()`. Only two keys:
+- `.env` is searched in this order by `cli._load_env_files()`, first hit wins: the current
+  directory (upwards), then **`~/.scopus-tools/.env`**, then the package location (upwards,
+  which only resolves for editable installs). The middle one is the canonical home — a
+  `uv tool install` user has no repo clone, and it sits beside the cache DB and projects.
+  Only two keys:
   - `SCOPUS_API_KEY` — required for any Scopus-touching command.
   - `KAKEN_APP_ID` — required for KAKEN-touching commands.
 - Local dev install:

@@ -115,21 +115,36 @@ def _check_required_keys(parser, command):
     if missing:
         names = ", ".join(missing)
         parser.error(
-            f"{command}: missing required environment variable(s): {names}. "
-            f"Set them in .env or your shell environment."
+            f"{command}: missing required environment variable(s): {names}.\n"
+            f"Put them in {user_env_path()} (works from any directory), "
+            f"or in a .env in the current directory, or export them in your shell.\n"
+            f"  mkdir -p {cachedb.default_state_dir()}\n"
+            f"  printf '{names.split(', ')[0]}=your_key\\n' >> {user_env_path()}\n"
+            f"  chmod 600 {user_env_path()}"
         )
 
 
 def _load_env_files():
-    """`.env` を読み込む。
+    """`.env` を読み込む。先に読まれた値が優先される
+    (`load_dotenv` は既存の環境変数を上書きしないため)。
 
-    `load_dotenv()` は **呼び出し元ファイル**(インストール先の site-packages)から
-    上に遡るため、非 editable インストールではカレントディレクトリの `.env` を
-    見つけられない。カレント基準の探索も明示的に行う。
-    先に読まれた値が優先される(`load_dotenv` は既存の環境変数を上書きしない)。
+    探索順:
+      1. 実行時のカレントディレクトリから上へ — プロジェクトごとに鍵を分けたい場合
+      2. `~/.scopus-tools/.env` — **どこから実行しても効く正規の置き場所**。
+         `uv tool install` で入れた場合はリポジトリのクローンが手元に無いので、
+         ここが唯一の安定した置き場所になる(キャッシュ DB とプロジェクト JSON も
+         同じディレクトリに住んでいる)
+      3. パッケージの位置から上へ — editable インストールでリポジトリ直下の
+         `.env` を拾うため。実インストールでは site-packages を遡るので当たらない
     """
-    load_dotenv(find_dotenv(usecwd=True))   # 実行時のカレントから探す
-    load_dotenv()                           # パッケージの位置から遡る(editable 用)
+    load_dotenv(find_dotenv(usecwd=True))
+    load_dotenv(user_env_path())
+    load_dotenv()
+
+
+def user_env_path():
+    """どこから実行しても読まれる `.env` のパス: `~/.scopus-tools/.env`"""
+    return os.path.join(cachedb.default_state_dir(), ".env")
 
 
 def main():

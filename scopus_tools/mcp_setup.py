@@ -305,11 +305,18 @@ def remove_claude_code(name=DEFAULT_SERVER_NAME, scope=None):
 # .env の権限チェック
 # ---------------------------------------------------------------------------
 
+def user_env_path():
+    """どこから実行しても読まれる `.env`: `~/.scopus-tools/.env`"""
+    from scopus_tools.cachedb import default_state_dir
+
+    return os.path.join(default_state_dir(), ".env")
+
+
 def find_env_file():
-    """`.env` の場所を探す(カレント基準 → パッケージ基準)。"""
+    """`.env` の場所を探す(カレント基準 → ~/.scopus-tools → パッケージ基準)。"""
     from dotenv import find_dotenv
 
-    for path in (find_dotenv(usecwd=True), find_dotenv()):
+    for path in (find_dotenv(usecwd=True), user_env_path(), find_dotenv()):
         if path and os.path.exists(path):
             return path
     return None

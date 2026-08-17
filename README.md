@@ -59,22 +59,25 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 ## クイックスタート
 
 ```bash
-# 1. クローンと仮想環境
-git clone https://github.com/huidsp/scopus-tools.git
-cd scopus-tools
-python3.12 -m venv .venv && source .venv/bin/activate
+# 1. インストール(uv が未導入なら: curl -LsSf https://astral.sh/uv/install.sh | sh)
+uv tool install "scopus_tools[mcp] @ git+https://github.com/huidsp/scopus-tools.git"
 
-# 2. 依存関係(MCP 込み)
-pip install -e ".[mcp]"
+# 2. API キーを置く。ここはどのディレクトリから実行しても読まれる
+mkdir -p ~/.scopus-tools
+printf 'SCOPUS_API_KEY=your_key\nKAKEN_APP_ID=your_appid\n' >> ~/.scopus-tools/.env
+chmod 600 ~/.scopus-tools/.env
 
-# 3. API キーを .env に書く(下のセクション参照)
+# 3. 動作確認
+scopus-tools search --first Hiroyuki --last Okamura
 
-# 4. 動作確認
-scopus-tools search --name "Hiroyuki Okamura"
-
-# 5. Claude Code に MCP サーバとして登録(絶対パスと鍵の受け渡しは自動)
-scopus-tools mcp-setup --scope user --scie-dir "$PWD/index"
+# 4. MCP クライアントに登録(絶対パスと鍵の受け渡しは自動)
+scopus-tools mcp-setup --scope user          # Claude Code
+scopus-tools mcp-setup --claude-desktop      # Claude Desktop
 ```
+
+WoS 収録インデックスも使う場合は、CSV を `~/.scopus-tools/index/` に置いて
+`--scie-dir ~/.scopus-tools/index` を付けてください(下の
+[Web of Science 収録インデックス](#web-of-science-収録インデックス)参照)。
 
 ---
 
@@ -334,27 +337,42 @@ Claude Code から `/mcp` でツール一覧(15 個)が見えれば成功です�
 
 KAKEN API は無料ですが、レートリミットがあるので大量取得時は注意。
 
-### `.env` ファイルの作成
+### API キーの置き場所
 
-プロジェクトのルートに `.env` を作成します(`python-dotenv` が起動時に読み込みます):
+**`~/.scopus-tools/.env` に置いてください。** どのディレクトリから実行しても読まれる
+唯一の場所で、キャッシュ DB とプロジェクト JSON も同じディレクトリにあります。
+`uv tool install` で入れた場合はリポジトリのクローンが手元に無いので、ここが本命です。
 
-```env
-# 必須: Scopus API キー
+```bash
+mkdir -p ~/.scopus-tools
+cat >> ~/.scopus-tools/.env <<'EOF'
 SCOPUS_API_KEY=your_scopus_api_key
-
-# 科研費連携用(任意)
 KAKEN_APP_ID=your_cinii_application_id
+EOF
+chmod 600 ~/.scopus-tools/.env
 ```
 
+`.env` は次の順に探され、**先に見つかった値が優先**されます:
+
+| 順 | 場所 | 用途 |
+|---|---|---|
+| 1 | 実行時のカレントディレクトリ(から上へ) | プロジェクトごとに鍵を分けたいとき |
+| 2 | **`~/.scopus-tools/.env`** | **どこから実行しても効く。通常はここ** |
+| 3 | パッケージの位置(から上へ) | `pip install -e` で開発しているとき、リポジトリ直下の `.env` |
+
+シェルの環境変数(`export SCOPUS_API_KEY=...`)があれば `.env` より優先されます。
+ただし **MCP クライアントはシェルを経由しない**ので、MCP で使う場合は
+`.env` に置くか `mcp-setup` で登録時に埋め込んでください。
+
 **セキュリティ注意**:
-- **`chmod 600 .env`** で自分だけが読める権限にすること
+- **`chmod 600`** で自分だけが読める権限にすること
   (既定の 644 だと同じマシンの他ユーザに鍵が読まれます。
   `scopus-tools mcp-setup --fix-permissions` でも直せます)
 - `.env` は **絶対に Git にコミットしないこと**(`.gitignore` に登録済み)
 - 共有マシンや CI では環境変数として直接設定するか、Vault / Secrets Manager を使う
 - キーが漏洩したら即座にプロバイダ側で無効化・再発行
 
-CLI 起動時に `.env` が無くてもシェルの環境変数(`export SCOPUS_API_KEY=...`)があれば動作します。
+鍵が見つからないとき、CLI は置き場所と実行できる手順を表示して終了します。
 
 ### どのキーがどのコマンドで必要か
 

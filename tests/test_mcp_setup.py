@@ -282,3 +282,39 @@ class TestTccProtectedPaths:
         entry = {"command": f"{home}/.local/bin/scopus-tools",
                  "args": ["mcp", "--scie-dir", f"{home}/.scopus-tools/index"]}
         assert mcp_setup.tcc_warnings(entry) == []
+
+
+class TestEnvFileLocations:
+    """`uv tool install` した利用者にはリポジトリのクローンが無いので、
+    `~/.scopus-tools/.env` がどこから実行しても効く唯一の置き場所になる。"""
+
+    def test_user_env_path_is_beside_the_cache(self, monkeypatch, tmp_path):
+        from scopus_tools import cachedb
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert mcp_setup.user_env_path() == os.path.join(cachedb.default_state_dir(), ".env")
+
+    def test_cli_and_mcp_setup_agree_on_the_location(self, monkeypatch, tmp_path):
+        from scopus_tools import cli
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert cli.user_env_path() == mcp_setup.user_env_path()
+
+    def test_found_when_only_the_user_env_exists(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path / "elsewhere" if (tmp_path / "elsewhere").exists()
+                          else tmp_path)
+        state = tmp_path / ".scopus-tools"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / ".env").write_text("SCOPUS_API_KEY=x\n")
+        assert mcp_setup.find_env_file() == str(state / ".env")
+
+    def test_keys_are_read_from_the_user_env(self, monkeypatch, tmp_path):
+        """CLI の探索順に ~/.scopus-tools/.env が入っていること。"""
+        from scopus_tools import cli
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SCOPUS_API_KEY", raising=False)
+        state = tmp_path / ".scopus-tools"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / ".env").write_text("SCOPUS_API_KEY=from-user-env\n")
+        cli._load_env_files()
+        assert os.environ["SCOPUS_API_KEY"] == "from-user-env"
