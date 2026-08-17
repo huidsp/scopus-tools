@@ -62,10 +62,8 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 # 1. インストール(uv が未導入なら: curl -LsSf https://astral.sh/uv/install.sh | sh)
 uv tool install "scopus_tools[mcp] @ git+https://github.com/huidsp/scopus-tools.git"
 
-# 2. API キーを置く。ここはどのディレクトリから実行しても読まれる
-mkdir -p ~/.scopus-tools
-printf 'SCOPUS_API_KEY=your_key\nKAKEN_APP_ID=your_appid\n' >> ~/.scopus-tools/.env
-chmod 600 ~/.scopus-tools/.env
+# 2. API キーを保存(~/.scopus-tools/.env に 600 で書かれる)
+scopus-tools config SCOPUS_API_KEY=your_key KAKEN_APP_ID=your_appid
 
 # 3. 動作確認
 scopus-tools search --first Hiroyuki --last Okamura
@@ -339,18 +337,26 @@ KAKEN API は無料ですが、レートリミットがあるので大量取得�
 
 ### API キーの置き場所
 
-**`~/.scopus-tools/.env` に置いてください。** どのディレクトリから実行しても読まれる
-唯一の場所で、キャッシュ DB とプロジェクト JSON も同じディレクトリにあります。
+**`scopus-tools config` で保存します。** 保存先は `~/.scopus-tools/.env` で、
+どのディレクトリから実行しても読まれます(キャッシュ DB とプロジェクト JSON も同じ場所)。
 `uv tool install` で入れた場合はリポジトリのクローンが手元に無いので、ここが本命です。
 
 ```bash
-mkdir -p ~/.scopus-tools
-cat >> ~/.scopus-tools/.env <<'EOF'
-SCOPUS_API_KEY=your_scopus_api_key
-KAKEN_APP_ID=your_cinii_application_id
-EOF
-chmod 600 ~/.scopus-tools/.env
+scopus-tools config SCOPUS_API_KEY=your_key KAKEN_APP_ID=your_appid
+scopus-tools config                       # 現在の設定を表示(値は伏せる)
+scopus-tools config --path                # ファイルの場所
+scopus-tools config --unset KAKEN_APP_ID  # 削除
 ```
+
+**値を省略すると画面に出さずに入力できます。** シェル履歴に鍵を残したくないときはこちら:
+
+```bash
+scopus-tools config SCOPUS_API_KEY
+SCOPUS_API_KEY:            # 入力しても表示されない
+```
+
+ファイルは必ず **600**(自分だけが読める)で書かれます。手で書いても構いませんが、
+その場合は `chmod 600` を忘れないでください。
 
 `.env` は次の順に探され、**先に見つかった値が優先**されます:
 
@@ -516,6 +522,17 @@ scopus-tools kaken-summary 80401243 --format json --output grants.json
 
 役割別・種目別の件数、配分額合計、課題一覧を表示。
 `--role principal_investigator` で代表者のみに絞れます。
+
+### `config` — API キーの保存
+
+```bash
+scopus-tools config SCOPUS_API_KEY=xxxx   # 保存(~/.scopus-tools/.env に 600 で書く)
+scopus-tools config SCOPUS_API_KEY        # 値を省略すると非表示で入力(履歴に残らない)
+scopus-tools config                       # 現在の設定(値は伏せる)
+scopus-tools config --path / --unset KEY
+```
+
+詳細は [API キーの置き場所](#api-キーの置き場所) を参照。
 
 ### `cache` — キャッシュの運用
 

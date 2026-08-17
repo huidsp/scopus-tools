@@ -306,10 +306,10 @@ def remove_claude_code(name=DEFAULT_SERVER_NAME, scope=None):
 # ---------------------------------------------------------------------------
 
 def user_env_path():
-    """どこから実行しても読まれる `.env`: `~/.scopus-tools/.env`"""
-    from scopus_tools.cachedb import default_state_dir
+    """どこから実行しても読まれる `.env`(実体は `config.user_env_path`)。"""
+    from scopus_tools.config import user_env_path as _p
 
-    return os.path.join(default_state_dir(), ".env")
+    return _p()
 
 
 def find_env_file():

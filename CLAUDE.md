@@ -267,6 +267,14 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     differ by more than a day. It **warns, never blocks** — that was an explicit decision.
   - Tool docstrings are sent to the model as the tool description — keep them useful.
 
+- **`config`** — reads and writes `~/.scopus-tools/.env`, behind `scopus-tools config`.
+  Always writes mode 600 (the file holds API keys in plain text) via the same
+  `tempfile` + `os.replace` pattern used elsewhere, merges rather than replaces, and keeps
+  keys it does not own so the file is not monopolised. Unknown key names are rejected rather
+  than silently written, so a typo cannot look like success. `config KEY` without a value
+  prompts via `getpass` — a key passed on the command line lands in shell history.
+  `user_env_path()` here is the single definition; `cli` and `mcp_setup` both delegate to it.
+
 - **`mcp_setup`** — automates MCP client registration. Exists because two things reliably
   break a hand-written registration, both verified empirically:
   - **The command must be an absolute path.** MCP clients spawn the server without a shell,

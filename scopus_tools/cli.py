@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from dotenv import find_dotenv, load_dotenv
-from scopus_tools import api, asof, cachedb, core, httpcache, mcp_setup, utils, kaken, scie
+from scopus_tools import api, asof, cachedb, config, core, httpcache, mcp_setup, utils, kaken, scie
 
 
 # どのサブコマンドにどの環境変数が必須か。
@@ -22,6 +22,7 @@ KEY_REQUIREMENTS = {
     "kaken-summary": ["KAKEN_APP_ID"],
     "mcp":           [],
     "mcp-setup":     [],
+    "config":        [],
     "cache":         [],
 }
 
@@ -143,8 +144,8 @@ def _load_env_files():
 
 
 def user_env_path():
-    """どこから実行しても読まれる `.env` のパス: `~/.scopus-tools/.env`"""
-    return os.path.join(cachedb.default_state_dir(), ".env")
+    """どこから実行しても読まれる `.env` のパス(実体は `config.user_env_path`)。"""
+    return config.user_env_path()
 
 
 def main():
@@ -335,6 +336,18 @@ def main():
     setup_p.add_argument("--projects-dir", dest="setup_projects_dir", default=None,
                          help="Passed through to `mcp --projects-dir`")
 
+    # 8b. config (API キーの保存)
+    config_p = subparsers.add_parser(
+        "config", help="Store API keys in ~/.scopus-tools/.env")
+    config_p.add_argument("assignments", nargs="*", metavar="KEY=VALUE",
+                          help="e.g. SCOPUS_API_KEY=xxxx. Omit the value "
+                               "(just SCOPUS_API_KEY) to be prompted without echo, "
+                               "which keeps the key out of your shell history.")
+    config_p.add_argument("--unset", nargs="+", default=None, metavar="KEY",
+                          help="Remove keys")
+    config_p.add_argument("--path", dest="show_path", action="store_true",
+                          help="Print the .env path and exit")
+
     # 9. cache (キャッシュの運用)
     cache_p = subparsers.add_parser("cache", help="Inspect and maintain the response cache")
     cache_sub = cache_p.add_subparsers(dest="cache_command")
@@ -382,6 +395,9 @@ def main():
     if args.command == "mcp-setup":
         _mcp_setup_command(args, parser)
         return
+    if args.command == "config":
+        _config_command(args, parser)
+        return
 
     # キャッシュ DB と Session はプロセスで 1 つだけ作り、全クライアントで共有する
     http_ctx = httpcache.build_context(
@@ -407,6 +423,62 @@ def _mask_keys(cmd):
         else:
             masked.append(arg)
     return masked
+
+
+def _config_command(args, parser):
+    """`scopus-tools config [KEY=VALUE ...]`。API キーを ~/.scopus-tools/.env に保存する。"""
+    import getpass
+
+    if args.show_path:
+        print(config.user_env_path())
+        return
+
+    if args.unset:
+        removed = config.unset_keys(args.unset)
+        print(f"Removed: {', '.join(removed)}" if removed else "Nothing to remove.")
+        return
+
+    if args.assignments:
+        try:
+            assignments, need_value = config.parse_assignments(args.assignments)
+        except ValueError as e:
+            parser.error(f"config: {e}")
+        # 値を省略されたものは echo せずに入力させる(シェル履歴に残さないため)
+        for key in need_value:
+            try:
+                value = getpass.getpass(f"{key}: ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                parser.error("config: aborted")
+            if not value.strip():
+                parser.error(f"config: no value given for {key}")
+            assignments[key] = value.strip()
+        try:
+            path = config.set_keys(assignments)
+        except ValueError as e:
+            parser.error(f"config: {e}")
+        print(f"Saved {', '.join(sorted(assignments))} to {path} (mode 600)")
+        return
+
+    # 引数が無ければ現状を表示する
+    info = config.describe()
+    print(f"Key file: {info['path']}")
+    if not info["exists"]:
+        print("  (not created yet)")
+        print("\nSet a key with either of:")
+        print("  scopus-tools config SCOPUS_API_KEY=your_key")
+        print("  scopus-tools config SCOPUS_API_KEY      # prompts, stays out of shell history")
+        return
+    print(f"  mode: {info['mode']}")
+    for key, masked in info["keys"].items():
+        print(f"  {key} = {masked}")
+    for key in info["missing"]:
+        print(f"  {key} = (not set)")
+    if info["other_keys"]:
+        print(f"  other keys kept as-is: {', '.join(info['other_keys'])}")
+    if info["world_readable"]:
+        print(f"\nWARNING: {info['path']} is readable by other users. "
+              f"Run: chmod 600 {info['path']}")
 
 
 def _mcp_setup_command(args, parser):
