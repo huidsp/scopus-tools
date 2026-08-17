@@ -315,6 +315,19 @@ def print_papers_list(first, last, s_ids, papers, year_range, header=True):
         if p.get("type"):
             print(f"     種別      : {p['type']}")
         print(f"     引用数    : {p.get('citations', 0)}")
+        metrics = p.get("metrics")
+        if metrics and metrics.get("citescore") is not None:
+            # **年を必ず併記する。** どの年の指標か分からない数字は使えない。
+            year = metrics.get("metric_year")
+            mark = "" if metrics.get("year_match") == "exact" else "≈"
+            prov = " 暫定" if metrics.get("provisional") else ""
+            pct = metrics.get("percentile")
+            rank = f" {pct}%ile {metrics.get('quartile')}" if pct is not None else ""
+            print(f"     CiteScore : {metrics['citescore']} ({mark}{year}年{prov}){rank}")
+        jcr_rec = p.get("jcr")
+        if jcr_rec and jcr_rec.get("jif") is not None:
+            print(f"     JIF       : {jcr_rec['jif']} "
+                  f"({jcr_rec.get('quartile')}, JCR{jcr_rec.get('jcr_year')})")
         if p.get("eid"):
             print(f"     EID       : {p['eid']}")
 

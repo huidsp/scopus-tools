@@ -42,6 +42,9 @@ API_LIMITS = {
     "scopus_search":           {"rps": 9, "weekly": 20000},
     "scopus_author_search":    {"rps": 2, "weekly": 5000},
     "scopus_author_retrieval": {"rps": 3, "weekly": 5000},
+    # Serial Title(雑誌指標)。実測ヘッダが X-RateLimit-Limit: 20000 で、
+    # scopus_search とは**別枠**。rps は Elsevier 公表値に合わせ控えめに 6。
+    "scopus_serial":           {"rps": 6, "weekly": 20000},
     "kaken_project":           {"rps": 1, "weekly": None},
     "kaken_researcher":        {"rps": 1, "weekly": None},
     # Web of Science Starter。契約機関(Institutional)は 5 req/s・5,000 req/日。

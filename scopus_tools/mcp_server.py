@@ -23,7 +23,7 @@ import sys
 import requests
 
 from scopus_tools import (api, asof, core, httpcache, jcr, kaken, linking,
-                          projects, scie, wos)
+                          projects, scie, serial, wos)
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +227,22 @@ def _get_store():
     return _project_store
 
 
+def _attach_metrics(client, papers, records=None):
+    """論文に Scopus の雑誌指標を付ける(オプトイン経路からのみ呼ぶ)。
+
+    ISSN を集めてまとめて 1 回引く。雑誌指標は年 1 回しか変わらないので
+    キャッシュがよく効き、715 誌でも 29 リクエストで済む。
+    """
+    issns = [p.get("issn") or p.get("eissn") for p in papers or []]
+    table, missing = client.get_serial_metrics([i for i in issns if i])
+    hits = serial.annotate_papers_metrics(papers, table)
+    return {
+        "journals_resolved": len({i for i in table}),
+        "journals_unresolved": len(missing),
+        "papers_annotated": hits,
+    }
+
+
 def _split_ids(author_ids):
     """'123,456' / ['123','456'] のどちらでも受け取り、リストに正規化する。"""
     if isinstance(author_ids, str):
@@ -339,7 +355,7 @@ def author_profile(author_id, refresh=False):
 
 
 @_network_guard
-def author_summary(author_ids, year_range=None, refresh=False):
+def author_summary(author_ids, year_range=None, include_metrics=False, refresh=False):
     """著者の書誌指標(H/G-index、被引用、筆頭著者数、WoS 収録数)をまとめる。
 
     応答の `as_of` / `as_of_note` に「いつ時点のデータか」が入る。被引用数は
@@ -375,13 +391,18 @@ def author_summary(author_ids, year_range=None, refresh=False):
         recent = [p for p in papers if years[0] <= p.get("year", 0) <= years[1]]
         payload["jcr_summary"] = jcr.summarize_jcr(recent)
         payload["jcr_summary"]["year_range"] = list(years)
+    if include_metrics:
+        payload["metrics_fetch"] = _attach_metrics(client, papers)
+        recent = [p for p in papers if years[0] <= p.get("year", 0) <= years[1]]
+        payload["metrics_summary"] = serial.summarize_metrics(recent)
+        payload["metrics_summary"]["year_range"] = list(years)
     _attach_completeness(payload, fetched)
     return _with_as_of(payload, records, "scopus_search")
 
 
 @_network_guard
 def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_only=False,
-                include_author_ids=False, refresh=False):
+                include_author_ids=False, include_metrics=False, refresh=False):
     """指定期間に出版された論文を、著者順位と WoS 収録インデックス付きで列挙する。
 
     応答の `as_of` / `as_of_note` に「いつ時点のデータか」が入る。
@@ -414,8 +435,12 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
         scie.annotate_papers_indexes(papers, _INDEX_SETS)
     if _JCR_TABLE:
         jcr.annotate_papers_jcr(papers, _JCR_TABLE)
-        if scie_only:
-            papers = [p for p in papers if p.get("wos_indexes")]
+    metrics_fetch = _attach_metrics(_get_scopus(), papers) if include_metrics else None
+    # 絞り込みは注釈がすべて終わってから、**必ず実行する**。
+    # ここが if _JCR_TABLE: の下に入れ子になっていた時期があり、JCR CSV を
+    # 読んでいないと scie_only が黙って効かなかった。
+    if scie_only:
+        papers = [p for p in papers if p.get("wos_indexes")]
 
     papers.sort(key=lambda p: (-(p.get("year") or 0), -(p.get("citations") or 0)))
     total = len(papers)
@@ -429,6 +454,8 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
         "truncated": truncated,
         "papers": papers[:limit],
     }
+    if metrics_fetch:
+        payload["metrics_fetch"] = metrics_fetch
     _attach_completeness(payload, fetched)
     return _with_as_of(payload, records, "scopus_search")
 
@@ -656,7 +683,7 @@ def wos_find_document(doi=None, title=None, author_last_name=None, limit=10,
 @_network_guard
 def wos_author_documents(researcher_id=None, name=None, organization=None,
                          year_range=None, limit=DEFAULT_PAPER_LIMIT,
-                         scie_only=False, refresh=False):
+                         scie_only=False, include_metrics=False, refresh=False):
     """Web of Science で著者の業績を取得する(WoS の Times Cited 付き)。
 
     **著者の指定方法で結果の性格が大きく変わる。両方の欠点を理解して使うこと:**
@@ -695,15 +722,18 @@ def wos_author_documents(researcher_id=None, name=None, organization=None,
         scie.annotate_papers_indexes(papers, _INDEX_SETS)
     if _JCR_TABLE:
         jcr.annotate_papers_jcr(papers, _JCR_TABLE)
-        if scie_only:
-            papers = [p for p in papers if p.get("wos_indexes")]
-            fetched.papers = papers
+    metrics_fetch = _attach_metrics(_get_scopus(), papers) if include_metrics else None
+    if scie_only:
+        papers = [p for p in papers if p.get("wos_indexes")]
+        fetched.papers = papers
 
     payload = _wos_payload(fetched, {
         "query": {"researcher_id": researcher_id, "name": name,
                   "organization": organization, "year_range": years},
         "strategy": "researcher_id" if researcher_id else "name",
     }, limit)
+    if metrics_fetch:
+        payload["metrics_fetch"] = metrics_fetch
 
     if researcher_id:
         payload["caveat"] = (
@@ -724,6 +754,61 @@ def wos_author_documents(researcher_id=None, name=None, organization=None,
     return _with_as_of(payload, records, "wos_documents")
 
 
+@_network_guard
+def journal_metrics(issns, year=None, refresh=False):
+    """ISSN から雑誌指標(CiteScore / 分野内パーセンタイル / SJR / SNIP)を引く。
+
+    `year` を渡すと**その年の**指標を選ぶ。CiteScore は 2011 年以降の年次履歴を
+    持つので、論文の出版年に合わせた値が出せる。応答の `metric_year` と
+    `year_match`("exact" / "nearest" / "none")で、どの年の値かが必ず分かる。
+
+    **CiteScore は Impact Factor ではない。** 4 年窓で分母が全文献種別なので IF より
+    大きく出る。「IF」として報告してはいけない。分野をまたいで比較したいときは
+    `percentile`(その分野で上位何 %)を使うこと — 生値の比較は分野差で歪む。
+
+    SJR / SNIP は**最新年しか返らない**ので、出版年には合わせられない
+    (`sjr.year` にその年が入っている)。
+
+    論文一覧に指標を付けたいだけなら、このツールではなく
+    `list_papers(include_metrics=true)` を使う方が少ないリクエストで済む。
+    """
+    try:
+        client = _get_scopus()
+    except RuntimeError as e:
+        return _error(str(e))
+    wanted = _split_ids(issns)
+    if not wanted:
+        return _error("issns is empty")
+    with _fetching(client, refresh) as records:
+        table, missing = client.get_serial_metrics(wanted)
+
+    journals, seen = [], set()
+    for rec in table.values():
+        key = tuple(rec["issns"])
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = serial.pick_metrics_for_year(rec, int(year) if year else None)
+        entry["issns"] = rec["issns"]
+        entry["subject_areas"] = rec["subject_areas"]
+        journals.append(entry)
+
+    payload = {
+        "requested": wanted,
+        "year": int(year) if year else None,
+        "count": len(journals),
+        "journals": journals,
+        "unresolved": missing,
+        "note": ("CiteScore is not the Journal Impact Factor (4-year window, all "
+                 "document types). Use percentile to compare across fields."),
+    }
+    if missing:
+        payload["unresolved_note"] = (
+            f"{len(missing)} ISSN(s) are not in Scopus's serial catalogue, or the "
+            f"journal has no metrics. This is not an error.")
+    return _with_as_of(payload, records, "scopus_serial")
+
+
 _TOOLS = [
     # データ取得
     search_author,
@@ -737,6 +822,8 @@ _TOOLS = [
     # Web of Science(WoS の Times Cited。収録版は返らないので scie.py は併用)
     wos_find_document,
     wos_author_documents,
+    # 雑誌指標(Scopus Serial Title)
+    journal_metrics,
     # プロジェクト永続化
     list_projects,
     read_project,

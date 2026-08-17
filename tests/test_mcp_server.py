@@ -383,7 +383,7 @@ class TestToolRegistry:
             "search_author", "find_papers", "author_profile", "author_summary",
             "list_papers", "kaken_search_researcher", "kaken_grants",
             "link_kaken_researcher",
-            "wos_find_document", "wos_author_documents",
+            "wos_find_document", "wos_author_documents", "journal_metrics",
             "list_projects", "read_project", "create_project",
             "delete_project", "save_researcher_section", "save_comparison",
             "cache_stats",
@@ -400,3 +400,43 @@ class TestToolRegistry:
     def test_all_tools_have_docstrings(self):
         # docstring は MCP のツール説明としてモデルに渡るため必須
         assert all(fn.__doc__ for fn in mcp_server._TOOLS)
+
+
+class TestScieOnlyIndependentOfOtherAnnotations:
+    """`scie_only` の絞り込みは、他の注釈が有効かどうかに依存してはいけない。
+
+    v0.11.0 で JCR の注釈を足したとき、この絞り込みが `if _JCR_TABLE:` の下に
+    入れ子になってしまい、**JCR CSV を読んでいないと scie_only が黙って無視された**。
+    人事選考では「SCIE 収録のみで N 件」が水増しされる形になるので、静かに壊れると危ない。
+    """
+
+    def _client(self, papers):
+        from scopus_tools.api import FetchResult
+        client = MagicMock()
+        client._http.refresh = False
+        client.search_papers_detailed.return_value = FetchResult(
+            papers=papers, complete=True, request_count=1, expected_total=len(papers))
+        return client
+
+    def _papers(self):
+        return [
+            {"title": "in SCIE", "year": 2023, "citations": 5, "issn": "1111-1111"},
+            {"title": "not indexed", "year": 2023, "citations": 1, "issn": "2222-2222"},
+        ]
+
+    def test_scie_only_filters_without_jcr_loaded(self, monkeypatch, scopus_env):
+        monkeypatch.setattr(mcp_server, "_scopus_client", self._client(self._papers()))
+        monkeypatch.setattr(mcp_server, "_INDEX_SETS", {"SCIE": {"11111111"}})
+        monkeypatch.setattr(mcp_server, "_JCR_TABLE", {})       # JCR は無い
+        result = mcp_server.list_papers("111", scie_only=True)
+        assert result["total_count"] == 1
+        assert result["papers"][0]["title"] == "in SCIE"
+
+    def test_scie_only_still_filters_with_jcr_loaded(self, monkeypatch, scopus_env):
+        monkeypatch.setattr(mcp_server, "_scopus_client", self._client(self._papers()))
+        monkeypatch.setattr(mcp_server, "_INDEX_SETS", {"SCIE": {"11111111"}})
+        monkeypatch.setattr(mcp_server, "_JCR_TABLE",
+                            {"11111111": {"jif": 1.0, "quartile": "Q1", "jci": None,
+                                          "jcr_year": 2025, "categories": []}})
+        result = mcp_server.list_papers("111", scie_only=True)
+        assert result["total_count"] == 1

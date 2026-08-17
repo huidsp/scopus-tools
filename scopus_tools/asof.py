@@ -26,6 +26,8 @@ DEFAULT_STALE_DAYS = {
                                     #  が別途 1 日で見張るので、ここを短くする必要はない)
     "scopus_author_search":   90,    # 名前 → Scopus ID の対応はほぼ変わらない
     "scopus_author_retrieval": 90,   # 著者の姓名。ほぼ変わらない
+    "scopus_serial":         180,    # CiteScore は**年 1 回**しか更新されない。
+                                    # 30 日で「古い」と警告するのは誤報になる。
     "kaken_project":          30,    # 採択課題は年度単位で増える
     "kaken_researcher":       90,    # 研究者番号の対応はほぼ変わらない
     "wos_documents":          30,    # 被引用数が動く。Scopus 側と揃える

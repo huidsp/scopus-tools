@@ -1,6 +1,7 @@
 import os
 import logging
 
+from scopus_tools import scie
 from scopus_tools.httpcache import HttpLayer
 from scopus_tools.utils import progress, progress_done
 
@@ -158,6 +159,59 @@ class ScopusClient:
         else:
             self._http = HttpLayer(auth_params=auth)
         logger.debug("ScopusClient initialized.")
+
+    def get_serial_metrics(self, issns):
+        """ISSN 群の雑誌指標(CiteScore / SJR / SNIP)を引く。
+
+        戻り値は `({正規化ISSN: レコード}, [取得できなかった ISSN])`。
+        業績リストと違い、一部の雑誌の指標が欠けても致命的ではないので
+        `FetchResult` は使わない。ただし欠けた事実は必ず返す。
+
+        **応答は位置ではなく ISSN で突き合わせること。** 未知の ISSN はエラーに
+        ならず単に返ってこない(実測: 50 件要求して 49 件)ので、順番で対応付けると
+        全部ずれる。`serial.parse_serial_entry` が拾う `prism:issn` / `prism:eIssn`
+        の両方をキーにする。
+        """
+        from scopus_tools import serial
+
+        wanted, seen = [], set()
+        for value in issns or []:
+            key = scie.normalize_issn(value)
+            if key and key not in seen:
+                seen.add(key)
+                wanted.append(key)
+        if not wanted:
+            return {}, []
+
+        url = f"{self.base_url}/serial/title"
+        table = {}
+        for start in range(0, len(wanted), serial.BATCH_SIZE):
+            chunk = wanted[start:start + serial.BATCH_SIZE]
+            response = self._http.get(
+                url,
+                params={"issn": ",".join(chunk), "view": "CITESCORE",
+                        "count": serial.BATCH_SIZE},
+                headers={"Accept": "application/json"}, api="scopus_serial")
+            if response.status_code != 200:
+                logger.warning("Serial title request failed: status=%s body=%s",
+                               response.status_code,
+                               response.text[:200].replace("\n", " "))
+                continue
+            try:
+                entries = response.json()["serial-metadata-response"].get("entry") or []
+            except (ValueError, KeyError, TypeError):
+                logger.warning("Unexpected serial title response for %d ISSNs", len(chunk))
+                continue
+            for entry in entries:
+                record = serial.parse_serial_entry(entry)
+                for issn in record["issns"]:
+                    table[issn] = record
+
+        missing = [i for i in wanted if i not in table]
+        logger.info("Serial metrics: %d/%d ISSNs resolved (%d requests)",
+                    len(wanted) - len(missing), len(wanted),
+                    -(-len(wanted) // serial.BATCH_SIZE))
+        return table, missing
 
     def get_author_profile(self, author_id):
         url = f"{self.base_url}/author/author_id/{author_id}"

@@ -164,6 +164,9 @@ Both are injected after the cache key is computed, so neither reaches the DB.
     one bad record killed the whole author fetch. `core.summarize_papers` then excludes
     `year == 0` from `start_year`, since including it made `research_years` come out as
     `current_year + 1`.
+  - `get_serial_metrics(issns)` fetches journal metrics in batches of 25 and returns
+    `(table, missing)`. See the `serial` module note — the response must be matched by
+    ISSN, never by position.
   - `parse_entry(entry, author_ids=None, detail=False, include_abstract=False)` turns one
     Scopus entry into a paper dict, shared by every fetch path.
     - **`author_ids=None` leaves `is_first_author` and `author_position` as `None`**, not
@@ -286,6 +289,35 @@ Both are injected after the cache key is computed, so neither reaches the DB.
     pass them via `--scie-list`. Each index is a separate download — a single CSV has no
     per-row index label. The data files are gitignored.
 
+- **`serial`** — Scopus Serial Title API の雑誌指標(CiteScore / 分野内パーセンタイル /
+  SJR / SNIP)。純関数のみ。取得は `api.ScopusClient.get_serial_metrics()`
+  (Scopus のネットワーク境界を 1 つに保つため。WoS と違い同じベンダ・同じ鍵)。
+  - **これが `jcr` を置き換える理由は、出版年に合わせられること。** CiteScore は
+    **2011–2026 の 16 年分**が 1 応答に入るので、2013 年の論文には当時の値が付く
+    (実測: 同じ誌が 2013→5.2 / 2021→10.2 / 2025→21.9)。JCR は書き出しが最新年
+    だけで、年ごとに揃えるには 5 年 × 15 カテゴリの手作業が要り、実務にならなかった。
+  - **カバー率も高い。** 実測で論文ベース **91%**(JCR は 42%)。
+    conferenceproceeding や bookseries(LNCS 等)にも CiteScore が付くのが差。
+  - `pick_metrics_for_year()` は必ず `metric_year` と
+    `year_match`(`exact` / `nearest` / `none`)を返す。**どの年の値かを黙って隠さない**
+    のがこの機能の要点。`@status` が In-Progress の年は `provisional` を立てる。
+    同着の年は**新しい方**を選ぶ(収録前の論文に古すぎる値を当てない)。
+  - **`CiteScore` は Impact Factor ではない** — 4 年窓・分母が全文献種別で、値が
+    大きく出る。指標名を置き換えて報告させないよう、ツール応答の `note` と
+    `summarize_metrics` の `note` の両方に書いてある。分野横断の比較に使えるのは
+    `percentile` の方。SJR / SNIP は**最新年しか返らない**ので出版年には合わせられず、
+    `{year, value}` の形で年を持たせてある。
+  - 取得は **25 ISSN ずつ**。実測で 50 指定は 49 件、100 指定は 96 件しか返らず、
+    未知の ISSN は**エラーにならず単に返ってこない**。だから
+    `get_serial_metrics` は**位置ではなく ISSN で突き合わせ**、取れなかった分を
+    第 2 戻り値で返す。ここを順番で対応付けると全部ずれる。
+  - クォータは `scopus_serial` で **週 20,000・`scopus_search` とは別枠**(実測ヘッダ)。
+    鮮度しきい値は **180 日** — CiteScore は年 1 回しか更新されないので、
+    30 日で「古い」と警告するのは誤報になる。
+  - `summarize_metrics` は**主指標を作らない**(4 指標を対等に並べる。利用者の選択)。
+    中央値を使うのは分布が歪むため。`year_match` の内訳は集計の信頼度そのもので、
+    `nearest` が多ければ「出版年の指標」として読んではいけない。
+
 - **`jcr`** — Journal Citation Reports の指標(JIF / 分位 / JCI)を論文に付ける。
   `scie` が ISSN の**集合**なのに対し、こちらは ISSN → **値**の対応表。
   - **The metrics are not available from any API we can reach.** WoS Starter's
@@ -327,10 +359,10 @@ Both are injected after the cache key is computed, so neither reaches the DB.
   - `_migrate_if_legacy()` auto-converts old flat-format files (a single researcher per project)
     on load — don't remove this until you're sure no old files exist.
 
-- **`mcp_server`** — MCP (stdio) frontend, 17 tools (the list lives in `_TOOLS`):
+- **`mcp_server`** — MCP (stdio) frontend, 18 tools (the list lives in `_TOOLS`):
   - Data retrieval: `search_author`, `author_profile`, `author_summary`, `list_papers`,
     `kaken_search_researcher`, `kaken_grants`, `link_kaken_researcher`,
-    `wos_find_document`, `wos_author_documents`.
+    `wos_find_document`, `wos_author_documents`, `journal_metrics`.
   - Project persistence: `list_projects`, `read_project`, `create_project`, `delete_project`,
     `save_researcher_section`, `save_comparison` — thin wrappers over `projects.py`.
   - **No evaluation tool, by design** — the host model calls the retrieval tools iteratively

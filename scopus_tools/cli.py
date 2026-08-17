@@ -7,7 +7,7 @@ import subprocess
 import sys
 from dotenv import find_dotenv, load_dotenv
 from scopus_tools import (api, asof, cachedb, config, core, httpcache, jcr,
-                          kaken, mcp_setup, scie, utils, wos)
+                          kaken, mcp_setup, scie, serial, utils, wos)
 
 
 # どのサブコマンドにどの環境変数が必須か。
@@ -227,6 +227,9 @@ def main():
                        help="Output format (default: text)")
     sum_p.add_argument("--output", default=None,
                        help="Write to file path instead of stdout")
+    sum_p.add_argument("--metrics", action="store_true",
+                       help="Annotate each paper with the journal's Scopus metrics "
+                            "(CiteScore / percentile / SJR / SNIP) for its publication year")
     sum_p.add_argument("--jcr-list", nargs="+", default=None, metavar="CSV",
                        help="One or more JCR export CSVs (see `papers --jcr-list`)")
     sum_p.add_argument("--scie-list", nargs="+", default=None, metavar="CSV",
@@ -244,6 +247,9 @@ def main():
                           help="Output format (default: text)")
     papers_p.add_argument("--output", default=None,
                           help="Write to file path instead of stdout (required for --format csv)")
+    papers_p.add_argument("--metrics", action="store_true",
+                       help="Annotate each paper with the journal's Scopus metrics "
+                            "(CiteScore / percentile / SJR / SNIP) for its publication year")
     papers_p.add_argument("--jcr-list", nargs="+", default=None, metavar="CSV",
                           help="One or more JCR export CSVs; annotates each paper with "
                                "the journal's Impact Factor and JIF quartile")
@@ -802,6 +808,7 @@ def _dispatch(args, parser, http_ctx):
         client = api.ScopusClient(context=http_ctx)
         index_sets = scie.load_index_sets(args.scie_list) if args.scie_list else None
         jcr_table = jcr.load_jcr_tables(args.jcr_list) if args.jcr_list else None
+        metric_table = None
         targets = _collect_targets(args, parser)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         is_batch = args.input is not None
@@ -824,6 +831,15 @@ def _dispatch(args, parser, http_ctx):
                 scie.annotate_papers_indexes(papers, index_sets)
             if jcr_table:
                 jcr.annotate_papers_jcr(papers, jcr_table)
+            if args.metrics:
+                if metric_table is None:
+                    metric_table = {}
+                need = [p.get('issn') or p.get('eissn') for p in papers]
+                need = [i for i in need if i and scie.normalize_issn(i) not in metric_table]
+                if need:
+                    fetched_tbl, _miss = client.get_serial_metrics(need)
+                    metric_table.update(fetched_tbl)
+                serial.annotate_papers_metrics(papers, metric_table)
             report = core.summarize_papers(papers, year_range=year_range)
             results.append((s_ids, first, last, report, papers))
         if is_batch:
@@ -851,6 +867,10 @@ def _dispatch(args, parser, http_ctx):
         _print_asof(asof_entries, args.stale_policy)
 
     elif args.command == "papers":
+        if args.metrics:
+            print("NOTE: CiteScore is not the Journal Impact Factor (4-year window, "
+                  "all document types). Percentile is what compares across fields.",
+                  file=sys.stderr)
         if args.format == "csv" and not args.output:
             parser.error("papers: --format csv requires --output")
         if args.scie_only and not args.scie_list:
@@ -858,6 +878,7 @@ def _dispatch(args, parser, http_ctx):
         client = api.ScopusClient(context=http_ctx)
         index_sets = scie.load_index_sets(args.scie_list) if args.scie_list else None
         jcr_table = jcr.load_jcr_tables(args.jcr_list) if args.jcr_list else None
+        metric_table = None
         targets = _collect_targets(args, parser)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         start_y, end_y = year_range
@@ -882,6 +903,15 @@ def _dispatch(args, parser, http_ctx):
                 scie.annotate_papers_indexes(papers, index_sets)
             if jcr_table:
                 jcr.annotate_papers_jcr(papers, jcr_table)
+            if args.metrics:
+                if metric_table is None:
+                    metric_table = {}
+                need = [p.get('issn') or p.get('eissn') for p in papers]
+                need = [i for i in need if i and scie.normalize_issn(i) not in metric_table]
+                if need:
+                    fetched_tbl, _miss = client.get_serial_metrics(need)
+                    metric_table.update(fetched_tbl)
+                serial.annotate_papers_metrics(papers, metric_table)
                 if args.scie_only:
                     papers = [p for p in papers if p.get("wos_indexes")]
             results.append((s_ids, first, last, papers))

@@ -54,6 +54,7 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 - MCP クライアントへの登録の自動化(`mcp-setup`)
 - タイトル / DOI から論文を引き、**分裂した Author ID を特定して合算**
 - Web of Science の被引用数(Times Cited)と ResearcherID による著者特定
+- **論文の出版年に対応した**雑誌指標(CiteScore / 分野内パーセンタイル / SJR / SNIP)
 
 ---
 
@@ -145,6 +146,7 @@ CLI と同じ内部ロジックを、ホスト側モデルから呼べる形で�
 | `kaken_grants` | `researcher_id`, `role` | 研究者番号から科研費課題一覧 |
 | `link_kaken_researcher` | `first_name`, `last_name`, `auto` | Scopus 氏名 → KAKEN 研究者番号の自動照合 |
 | `wos_find_document` | `doi`, `title`, `author_last_name`, `limit` | WoS で論文を引き、**著者を ResearcherID 付きで**返す |
+| `journal_metrics` | `issns`, `year` | 雑誌の **CiteScore / 分野内パーセンタイル / SJR / SNIP**。`year` を渡すとその年の値 |
 | `wos_author_documents` | `researcher_id`, `name`, `organization`, `year_range`, `limit`, `scie_only` | WoS の業績一覧(**WoS の Times Cited** 付き)。著者の指定方法で性格が変わる(下記) |
 | `cache_stats` | — | キャッシュの状態と Elsevier クォータの残量 |
 
@@ -251,7 +253,61 @@ scopus-tools wos --rid D-0000-2011 --years 2021-2025
 
 MCP ツールは応答に必ず `caveat` を付け、どちらの方法を使ったかとその弱点をモデルに伝えます。
 
+### 雑誌指標(Scopus)— CiteScore / パーセンタイル / SJR / SNIP
+
+**追加の鍵も手作業も要りません。** 既存の `SCOPUS_API_KEY` で Serial Title API から
+取得します。
+
+```bash
+scopus-tools papers <ID> --years 2021-2025 --metrics
+scopus-tools summary <ID> --years 2021-2025 --metrics --format json
+```
+
+#### 出版年に合わせた指標が出ます
+
+CiteScore は **2011〜2026 年の 16 年分**の履歴を持つので、論文ごとにその**出版年**の
+値を付けられます。実測（同一誌）:
+
+| 論文の出版年 | CiteScore |
+|---|---:|
+| 2013 | 5.2 |
+| 2021 | 10.2 |
+| 2025 | 21.9 |
+
+出力には必ず**どの年の値か**が付きます。`year_match` が
+
+- `exact` … その年の値がある
+- `nearest` … 無いので近い年で代用（`≈2013年` のように表示）
+- `none` … その誌に CiteScore が無い
+
+最新年は集計途中なので `provisional`(暫定)が立ちます。
+
+#### JCR との比較
+
+| | JCR（手作業 CSV） | **Scopus（API）** |
+|---|---|---|
+| 取得 | カテゴリ別に手作業、600 誌上限 | **自動**、25 誌ずつ一括 |
+| 年次履歴 | 最新年のみ | **16 年分** |
+| カバー率（実測・論文ベース） | 42% | **91%** |
+| 会議録・書籍シリーズ | 対象外 | **対象**（LNCS 等にも付く） |
+| クォータ | — | 週 20,000（`scopus_search` とは別枠） |
+
+715 誌でも 29 リクエスト。雑誌指標は年 1 回しか変わらないのでキャッシュがよく効きます。
+
+> **注意: CiteScore は Impact Factor ではありません。** 4 年窓で分母が全文献種別のため
+> IF より大きく出ます。「IF」として報告しないでください。分野をまたいで比較するなら
+> **パーセンタイル**（その分野で上位何 %）を使ってください。
+> SJR / SNIP は**最新年しか返らない**ので出版年には合わせられません。
+
+集計（`--metrics` 付きの `summary`）では **4 指標を対等に併記**し、主指標は設けていません。
+平均ではなく**中央値**を出します（雑誌指標は分布が強く歪むため）。
+`year_match` の内訳も出るので、`nearest` が多い集計は出版年の指標として読めないと判断できます。
+
 ### Impact Factor / 分位(JCR)
+
+> **常用は上の Scopus 側を推奨します。** JCR は出版年に合わせられず（年ごとに手作業が必要）、
+> カバー率も 42% に留まります。以下は「Q1〜Q4 を JCR 基準で出す必要がある」場合の手順です。
+
 
 IF と JIF 分位は **API では取れません**。WoS Starter の `/journals` は JCR ページへの
 **リンクだけ**を返し、数値は別契約の Journals API が必要です(Starter の鍵で叩くと
