@@ -194,6 +194,15 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
 - **`kaken.KakenClient`** — the only KAKEN network boundary. Wraps NRID (researcher) and KAKEN
   (project) OpenSearch endpoints. NRID returns JSON, KAKEN returns XML — both parsed into
   flat dicts. Requires `KAKEN_APP_ID`.
+  - **NRID responses are huge and must be narrowed at the parse step.** Each researcher item
+    embeds that person's entire publication list (`work:product`), ~1 MB each; 50 prolific
+    researchers measured at **29 MB**. `_parse_researcher_json` therefore keeps only the
+    identification fields (plus `project_count` / `product_count` as counts) and deliberately
+    does **not** carry the API item through — an earlier `raw` key made the MCP
+    `kaken_search_researcher` response 25 MB and the tool call timed out client-side.
+    `search_researcher_by_name` also defaults to `rw=20`, the smallest page NRID accepts
+    (valid values are 20/50/100/200/500 — smaller ones silently return nothing).
+    Grant details come from `get_grants_by_researcher_id`, which is small (~19 KB for 19 grants).
 
 - **`core`** — pure functions, no I/O.
   - `compute_indices(citations)` → `(h, g)`.

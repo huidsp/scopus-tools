@@ -46,8 +46,14 @@ class KakenClient:
             return None
         return resp
 
-    def search_researcher_by_name(self, name, lang="ja", rw=50):
-        """Search researchers by name. Returns list of researcher dicts."""
+    def search_researcher_by_name(self, name, lang="ja", rw=20):
+        """Search researchers by name. Returns list of researcher dicts.
+
+        rw は {20, 50, 100, 200, 500} のいずれか。NRID は 1 研究者あたり業績全件
+        (`work:product`)を返すため応答が非常に重く、多作な研究者が 50 件並ぶと
+        実測 29 MB になった。同姓同名の絞り込みに 20 件あれば足りるので既定を
+        最小値にしている。
+        """
         resp = self._request(
             self.RESEARCHER_ENDPOINT,
             {"qg": name, "format": "json", "lang": lang, "rw": rw},
@@ -121,6 +127,13 @@ def _pick_text(human_readable, lang="ja"):
 
 
 def _parse_researcher_json(data, lang="ja"):
+    """NRID の応答を「同定に必要な項目だけ」に絞って返す。
+
+    元の item をそのまま持たせない(以前は "raw" として入れていた)。1 件が
+    `work:product` / `work:project` を全件含むため 1 MB 前後あり、MCP の応答が
+    25 MB を超えてツール呼び出しがタイムアウトしていた。課題の詳細は
+    `get_grants_by_researcher_id` で研究者番号から別途取得する。
+    """
     if not isinstance(data, dict):
         return []
     items = data.get("researchers") or []
@@ -151,7 +164,6 @@ def _parse_researcher_json(data, lang="ja"):
             "job_title": job,
             "project_count": len(it.get("work:project") or []),
             "product_count": len(it.get("work:product") or []),
-            "raw": it,
         })
     return results
 
