@@ -58,15 +58,28 @@ class QuotaExceeded(Exception):
         self.reset_at = reset_at
         super().__init__(self._message())
 
+    @property
+    def reset_at_text(self):
+        """リセット時刻を「2026-08-20 15:23 (in 2d 23h)」形式で。不明なら None。
+
+        `reset_at` は epoch 秒。数値以外が来ても例外にしない — クォータ枯渇の
+        報告経路そのものが落ちると、本当の原因が見えなくなる。
+        """
+        try:
+            reset = float(self.reset_at)
+        except (TypeError, ValueError):
+            return None
+        remain = max(0, int(reset - time.time()))
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(reset))
+        return f"{when} (in {remain // 86400}d {(remain % 86400) // 3600}h)"
+
     def _message(self):
-        if not self.reset_at:
-            return (f"{self.api}: Elsevier quota exhausted. "
-                    f"Use --offline to work from cache.")
-        remain = max(0, int(self.reset_at - time.time()))
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.reset_at))
-        return (f"{self.api}: Elsevier quota exhausted until {when} "
-                f"(in {remain // 86400}d {(remain % 86400) // 3600}h). "
-                f"Use --offline to work from cache, or wait for the reset.")
+        # ベンダ名は API 種別から決める(KAKEN は NII で、Elsevier ではない)。
+        vendor = "NII" if self.api.startswith("kaken") else "Elsevier"
+        when = self.reset_at_text
+        if not when:
+            return f"{self.api}: {vendor} quota exhausted."
+        return f"{self.api}: {vendor} quota exhausted until {when}."
 
 
 class RateLimited(Exception):

@@ -15,9 +15,12 @@ stdio を汚さないこと: ログと進捗はすべて stderr に出す(`utils
 """
 
 import contextlib
+import functools
 import logging
 import os
 import sys
+
+import requests
 
 from scopus_tools import api, asof, core, httpcache, kaken, linking, projects, scie
 
@@ -42,9 +45,45 @@ _project_store = None
 DEFAULT_PAPER_LIMIT = 200
 
 
-def _error(message):
+def _error(message, **extra):
     """ツールのエラー応答。例外ではなく dict を返し、モデルが読めるようにする。"""
-    return {"error": message}
+    return {"error": message, **extra}
+
+
+def _network_guard(fn):
+    """取得系ツールが投げる通信系例外を `{"error": ...}` に変換する。
+
+    鍵の不足はもともと dict を返していたのに、**クォータ枯渇・オフライン・
+    タイムアウトは素通しで例外になっていた**。実運用で先に起きるのは後者で
+    (Author Search は週 5,000 件)、しかもそのときこそモデルに理由を伝えたい。
+    例外のままだとホスト側にはプロトコルエラーとしか見えず、モデルは原因が
+    分からないまま別の引数で叩き直す。
+
+    `retriable` を付けるのは、モデルに「今すぐ再試行して意味があるか」を
+    判断させるため。クォータ枯渇はリセットまで何度呼んでも無駄。
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except httpcache.QuotaExceeded as e:
+            return _error(
+                f"{e.api}: API quota exhausted"
+                + (f" until {e.reset_at_text}" if getattr(e, "reset_at_text", None) else "")
+                + ". Retrying will not help until it resets. Previously fetched data is "
+                  "still available from the cache.",
+                retriable=False, quota_exhausted=True, api=e.api)
+        except httpcache.OfflineError as e:
+            return _error(f"Offline mode: {e}. This response is not in the cache.",
+                          retriable=False, offline=True)
+        except httpcache.RateLimited as e:
+            return _error(f"Rate limited: {e}. Wait a few seconds and try again.",
+                          retriable=True)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            return _error(f"Network error contacting the API ({type(e).__name__}: {e}). "
+                          f"The service may be slow or unreachable; try again.",
+                          retriable=True)
+    return wrapper
 
 
 def _get_context():
@@ -126,23 +165,37 @@ def _as_of(records, default_api="generic"):
     return payload, entry.note()
 
 
-def _attach_completeness(payload, fetched):
+def _attach_completeness(payload, fetched, paginated=True):
     """取得が不完全なら、その事実をモデルに明示する。
 
     `truncated`(こちらが limit で切った)とは別物。`incomplete` は
     **Scopus から全部取れなかった**という意味で、業績の全体像として扱えない。
+
+    `paginated=False` は `find_papers` のような 1 リクエストで完結する経路。
+    「途中のページで止まった」という案内はそこでは事実に反するので出さない。
     """
     if fetched is None or getattr(fetched, "complete", True):
         return payload
     payload["incomplete"] = True
     payload["incomplete_reason"] = fetched.reason
-    payload["incomplete_note"] = (
-        f"WARNING: the publication list is incomplete ({fetched.reason}). "
-        f"Got {fetched.actual_total} of about {fetched.expected_total} records. "
-        f"Do not present these counts as a full publication record. "
-        f"Pagination stopped at the failing page, so call this tool again to fetch "
-        f"the rest — the pages already retrieved come from cache and cost no quota. "
-        f"Do NOT pass refresh=true for this (it would discard those cached pages).")
+
+    note = [f"WARNING: the fetch did not complete ({fetched.reason})."]
+    if fetched.expected_total is None:
+        # 総件数すら返ってきていない(認証エラー等)。「about None」と出さない。
+        note.append(f"Got {fetched.actual_total} records; Scopus did not report a total, "
+                    f"so how much is missing is unknown.")
+    else:
+        note.append(f"Got {fetched.actual_total} of about {fetched.expected_total} records.")
+    note.append("Do not present these counts as a full publication record.")
+    if paginated:
+        note.append("Pagination stopped at the failing page, so call this tool again to "
+                    "fetch the rest — the pages already retrieved come from cache and "
+                    "cost no quota. Do NOT pass refresh=true (it would discard them).")
+    else:
+        note.append("This lookup is a single request, so retrying it is cheap; "
+                    "if it keeps failing, the API key or network is the problem, "
+                    "not the query.")
+    payload["incomplete_note"] = " ".join(note)
     return payload
 
 
@@ -178,6 +231,7 @@ def _resolve_years(year_range):
 # ツール実体(MCP 層を通さず直接テストできるよう、素の関数として定義する)
 # ---------------------------------------------------------------------------
 
+@_network_guard
 def search_author(first_name, last_name, refresh=False):
     """Scopus 著者候補を検索する(1 リクエスト)。
 
@@ -208,6 +262,7 @@ def search_author(first_name, last_name, refresh=False):
     return _with_as_of(payload, records, "scopus_author_search")
 
 
+@_network_guard
 def find_papers(title=None, doi=None, author_last_name=None, limit=10,
                 include_abstract=False, refresh=False):
     """タイトルや DOI から論文を引き、**著者を Scopus Author ID 付きで**返す。
@@ -245,13 +300,17 @@ def find_papers(title=None, doi=None, author_last_name=None, limit=10,
         "returned_count": len(fetched.papers),
         "papers": fetched.papers,
     }
-    if not fetched.papers:
+    # 「見つからなかった」と言えるのは検索が成功したときだけ。取得自体が失敗
+    # (401 等)しているのに「語数を減らして再検索を」と促すと、モデルは原因に
+    # たどり着けないままタイトルを変えて延々と試し続ける。
+    if not fetched.papers and fetched.complete:
         payload["hint"] = ("No match. Scopus title matching is loose, so try fewer words, "
                            "or use the DOI if you have it.")
-    _attach_completeness(payload, fetched)
+    _attach_completeness(payload, fetched, paginated=False)
     return _with_as_of(payload, records, "scopus_search")
 
 
+@_network_guard
 def author_profile(author_id, refresh=False):
     """Scopus 著者 ID からプロフィール(姓名)を取得する。"""
     try:
@@ -265,6 +324,7 @@ def author_profile(author_id, refresh=False):
         records, "scopus_author_retrieval")
 
 
+@_network_guard
 def author_summary(author_ids, year_range=None, refresh=False):
     """著者の書誌指標(H/G-index、被引用、筆頭著者数、WoS 収録数)をまとめる。
 
@@ -298,6 +358,7 @@ def author_summary(author_ids, year_range=None, refresh=False):
     return _with_as_of(payload, records, "scopus_search")
 
 
+@_network_guard
 def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_only=False,
                 include_author_ids=False, refresh=False):
     """指定期間に出版された論文を、著者順位と WoS 収録インデックス付きで列挙する。
@@ -349,6 +410,7 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
     return _with_as_of(payload, records, "scopus_search")
 
 
+@_network_guard
 def kaken_search_researcher(name, refresh=False):
     """研究者名から KAKEN(NRID)の研究者候補を検索する。"""
     try:
@@ -361,6 +423,7 @@ def kaken_search_researcher(name, refresh=False):
                        records, "kaken_researcher")
 
 
+@_network_guard
 def kaken_grants(researcher_id, role=None, refresh=False):
     """研究者番号から KAKEN 課題(科研費)の一覧を取得する。"""
     try:
@@ -374,6 +437,7 @@ def kaken_grants(researcher_id, role=None, refresh=False):
         records, "kaken_project")
 
 
+@_network_guard
 def link_kaken_researcher(first_name, last_name, auto=False, refresh=False):
     """Scopus の著者氏名から KAKEN 研究者番号を名前ベースで自動照合する。
 

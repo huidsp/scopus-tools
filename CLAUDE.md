@@ -144,6 +144,13 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     fetch date is never treated as fresh.
 
 - **`api.ScopusClient`** — the only Scopus network boundary.
+  - `_cover_year()` parses `prism:coverDate` defensively, returning 0 when it is absent,
+    null, empty or malformed. `entry.get("prism:coverDate", "0000")[:4]` was not enough —
+    the default only applies when the **key** is missing, so a null value raised `TypeError`
+    and an empty string `ValueError`, from inside the `search_papers` pagination loop, where
+    one bad record killed the whole author fetch. `core.summarize_papers` then excludes
+    `year == 0` from `start_year`, since including it made `research_years` come out as
+    `current_year + 1`.
   - `parse_entry(entry, author_ids=None, detail=False, include_abstract=False)` turns one
     Scopus entry into a paper dict, shared by every fetch path.
     - **`author_ids=None` leaves `is_first_author` and `author_position` as `None`**, not
@@ -263,6 +270,19 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     return dicts. Missing API keys produce `{"error": ...}` rather than an exception, so the
     host model can relay the problem. Clients and the `ProjectStore` are lazily constructed in
     `_get_scopus` / `_get_kaken` / `_get_store`, so the server starts without any keys.
+  - **`@_network_guard` extends that contract to network failures.** Every retrieval tool
+    carries it; it converts `QuotaExceeded` / `OfflineError` / `RateLimited` /
+    `requests.Timeout` / `requests.ConnectionError` into `{"error": ..., "retriable": ...}`.
+    Only the missing-key case used to return a dict, so the far likelier failure — quota
+    exhaustion (Author Search is 5,000/week) — escaped as an exception, which the host sees
+    only as a protocol error, leaving the model to retry with different arguments forever.
+    `retriable=False` on quota/offline tells it retrying is pointless. Keep new retrieval
+    tools decorated.
+  - **A failed fetch must never read as "nothing found".** `find_papers` only attaches its
+    "No match, try fewer words" hint when `fetched.complete` — otherwise a 401 sent the model
+    off rewording titles indefinitely. `_attach_completeness(..., paginated=False)` likewise
+    drops the "pagination stopped at the failing page" sentence for the single-request paths,
+    and never prints `about None` when Scopus reported no total.
   - `_server_class()` absorbs the SDK rename: MCP SDK 2.x has `mcp.server.MCPServer`,
     1.x has `mcp.server.fastmcp.FastMCP`; `add_tool` / `run(transport=...)` are identical.
   - **stdout is the JSON-RPC channel** — never `print()` to stdout from anything reachable

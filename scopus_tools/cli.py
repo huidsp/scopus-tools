@@ -408,7 +408,9 @@ def main():
     except httpcache.OfflineError as e:
         parser.error(str(e))
     except httpcache.QuotaExceeded as e:
-        parser.error(str(e))
+        # --offline の案内は CLI にだけ意味がある(MCP 側は別文面を返す)。
+        parser.error(f"{e} Use --offline to work from the cache, "
+                     f"or wait for the reset.")
     finally:
         http_ctx.close()
 

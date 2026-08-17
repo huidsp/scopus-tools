@@ -55,6 +55,20 @@ def _as_list(value):
     return value if isinstance(value, list) else [value]
 
 
+def _cover_year(value):
+    """`prism:coverDate` から発行年を取り出す。取れなければ 0。
+
+    `entry.get("prism:coverDate", "0000")` では不十分だった。既定値が効くのは
+    **キーが無いとき**だけで、Scopus が値に null や空文字を返すと `None[:4]` の
+    TypeError / `int("")` の ValueError になる。これは `search_papers` の
+    ページングループの中で送出されるため、1 件の欠損が著者の取得全体を落とす。
+    """
+    try:
+        return int(str(value or "")[:4])
+    except (TypeError, ValueError):
+        return 0
+
+
 def parse_entry(entry, author_ids=None, detail=False, include_abstract=False):
     """Scopus の 1 エントリを論文 dict に変換する。
 
@@ -80,7 +94,7 @@ def parse_entry(entry, author_ids=None, detail=False, include_abstract=False):
 
     paper = {
         "title": entry.get("dc:title"),
-        "year": int(entry.get("prism:coverDate", "0000")[:4]),
+        "year": _cover_year(entry.get("prism:coverDate")),
         "citations": int(entry.get("citedby-count", 0)),
         "journal": entry.get("prism:publicationName"),
         "issn": entry.get("prism:issn", ""),

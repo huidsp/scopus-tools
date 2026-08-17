@@ -114,8 +114,11 @@ def summarize_papers(papers, recent_years=5, year_range=None):
     start_y, end_y = resolve_year_range(year_range=year_range, recent_years=recent_years, current_year=current_year)
     recent_papers = [p for p in papers if start_y <= p["year"] <= end_y]
 
-    start_year = min(p["year"] for p in papers)
-    research_years = current_year - start_year + 1
+    # 発行年が取れなかった論文は year=0 になる。これを最小値に含めると
+    # research_years が current_year+1 になり、報告書に「研究年数 2027 年」が出る。
+    known_years = [p["year"] for p in papers if p.get("year")]
+    start_year = min(known_years) if known_years else None
+    research_years = current_year - start_year + 1 if start_year else 0
 
     total_first = sum(1 for p in papers if p.get("is_first_author"))
     recent_first = sum(1 for p in recent_papers if p.get("is_first_author"))
