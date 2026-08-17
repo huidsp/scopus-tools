@@ -44,6 +44,10 @@ API_LIMITS = {
     "scopus_author_retrieval": {"rps": 3, "weekly": 5000},
     "kaken_project":           {"rps": 1, "weekly": None},
     "kaken_researcher":        {"rps": 1, "weekly": None},
+    # Web of Science Starter。契約機関(Institutional)は 5 req/s・5,000 req/日。
+    # 実測したレスポンスヘッダ X-RateLimit-Remaining-Day / -Second で確認できる。
+    # weekly は「週」枠なのでここでは None にし、日次はサーバ側の 429 に任せる。
+    "wos_documents":           {"rps": 5, "weekly": None},
 }
 
 DEFAULT_TIMEOUT = (10, 60)   # (connect, read)
@@ -178,12 +182,17 @@ def _raw_get(session, url, params, headers, timeout):
 
 
 class HttpLayer:
-    def __init__(self, *, db=None, session=None, auth_params=None,
+    def __init__(self, *, db=None, session=None, auth_params=None, auth_headers=None,
                  timeout=DEFAULT_TIMEOUT, max_retries=3, max_wait=60.0,
                  refresh=False, offline=False, enabled=None):
         self.db = db
         self.session = session
         self.auth_params = dict(auth_params or {})
+        # ヘッダで鍵を渡す API 用(Web of Science は X-ApiKey ヘッダ)。params と同じく
+        # キャッシュキー算出後に注入する。リクエストヘッダはキャッシュキーにも
+        # DB にも入らない(保存するのは HEADER_WHITELIST のレスポンスヘッダだけ)ので、
+        # これで鍵がディスクに落ちる経路は無い。
+        self.auth_headers = dict(auth_headers or {})
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_wait = max_wait
@@ -299,7 +308,9 @@ class HttpLayer:
         # 3. 送信(リトライ付き)
         send_params = dict(params)
         send_params.update(self.auth_params)   # 秘密はここで初めて混ざる
-        return self._send(url, send_params, headers, api, key, safe_params)
+        send_headers = dict(headers or {})
+        send_headers.update(self.auth_headers)
+        return self._send(url, send_params, send_headers, api, key, safe_params)
 
     def _send(self, url, send_params, headers, api, key, safe_params):
         attempt = 0
@@ -402,8 +413,9 @@ class HttpContext:
         self.offline = offline
         self.enabled = enabled
 
-    def layer_for(self, auth_params=None):
+    def layer_for(self, auth_params=None, auth_headers=None):
         return HttpLayer(db=self.db, session=self.session, auth_params=auth_params,
+                         auth_headers=auth_headers,
                          timeout=self.timeout, refresh=self.refresh,
                          offline=self.offline, enabled=self.enabled)
 

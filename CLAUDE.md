@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`scopus_tools` is a Python toolkit over the Elsevier Scopus REST API and the KAKEN (科研費) API.
+`scopus_tools` is a Python toolkit over the Elsevier Scopus REST API, the KAKEN (科研費) API
+and the Web of Science Starter API.
 It fetches researcher data, computes bibliometric indicators (H-index, G-index, citations,
 first-author counts), pulls KAKEN grant histories, and annotates papers with their
 Web of Science index coverage. It ships two frontends:
 
-- A CLI (`scopus-tools`) with 8 subcommands.
+- A CLI (`scopus-tools`) with 13 subcommands.
 - An MCP server (`scopus-tools mcp`, stdio) exposing data retrieval plus project persistence.
 
 **This package never calls an LLM over an API.** Evaluation, field inference, and
@@ -34,9 +35,13 @@ and CLI flag names stay in English.
   directory (upwards), then **`~/.scopus-tools/.env`**, then the package location (upwards,
   which only resolves for editable installs). The middle one is the canonical home — a
   `uv tool install` user has no repo clone, and it sits beside the cache DB and projects.
-  Only two keys:
+  Three keys:
   - `SCOPUS_API_KEY` — required for any Scopus-touching command.
   - `KAKEN_APP_ID` — required for KAKEN-touching commands.
+  - `WOS_API_KEY` — required for the `wos` command and the two WoS MCP tools.
+    Register at developer.clarivate.com **from the subscribing institution's network**;
+    the plan (and therefore the quota, and whether Times Cited is returned) is decided
+    by the IP you register from.
 - Local dev install:
 
   ```bash
@@ -76,6 +81,9 @@ CLI subcommands (see `scopus_tools/cli.py`):
 - `mcp-setup` — registers this tool with Claude Code (`claude mcp add`) or Claude Desktop.
   Touches no network. See the `mcp_setup` module note below.
 - `cache` — `stats` / `list` / `clear` / `vacuum` / `path`. Touches no network.
+- `wos` — Web of Science lookups. `--rid` (ResearcherID/ORCID), `--name [--org]`,
+  `--doi`/`--title`, `--years`, `--limit`. See the `wos` module note on which of the two
+  author-matching strategies to trust.
 - `mcp` — runs the MCP server over stdio (see `mcp_server`); takes `--projects-dir`,
   `--scie-list CSV [CSV ...]`, and `--scie-dir DIR` (loads every `*.csv` in DIR). With neither
   scie flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir.
@@ -95,16 +103,19 @@ last 5 years** via `core.default_eval_year_range()` (e.g., in 2026 → `(2021, 2
 The codebase is intentionally flat — modules under `scopus_tools/`, each with a single responsibility.
 Two control flows:
 
-**CLI**: `cli.py` → `ScopusClient` / `KakenClient` → `core` (pure functions) → `utils` (presentation).
-**MCP**: `mcp_server.py` → `ScopusClient` / `KakenClient` / `ProjectStore` → `core` / `scie` /
-`linking` → JSON dicts (no `utils` presentation layer).
+**CLI**: `cli.py` → `ScopusClient` / `KakenClient` / `WosClient` → `core` (pure functions)
+→ `utils` (presentation).
+**MCP**: `mcp_server.py` → `ScopusClient` / `KakenClient` / `WosClient` / `ProjectStore`
+→ `core` / `scie` / `linking` → JSON dicts (no `utils` presentation layer).
 
-Both clients send through **one** `httpcache.HttpLayer`, minted per-client from a shared
-`HttpContext` (one SQLite cache + one `requests.Session` per process).
+Each client sends through its own `httpcache.HttpLayer`, minted from a shared
+`HttpContext` (one SQLite cache + one `requests.Session` per process). Scopus and KAKEN
+authenticate with a query parameter (`auth_params`); WoS uses a header (`auth_headers`).
+Both are injected after the cache key is computed, so neither reaches the DB.
 
 ### Modules
 
-- **`httpcache`** — the single outbound HTTP seam for **both** clients. Timeout, connection
+- **`httpcache`** — the single outbound HTTP seam for **all three** clients. Timeout, connection
   pooling, throttle, 429/5xx retry, and the SQLite response cache all live here.
   - **Never write secrets to disk.** `apiKey`/`appid` live in `HttpLayer(auth_params=...)` and
     are injected *after* the cache key and `params_json` are computed, so they cannot reach the
@@ -211,6 +222,36 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     (valid values are 20/50/100/200/500 — smaller ones silently return nothing).
     Grant details come from `get_grants_by_researcher_id`, which is small (~19 KB for 19 grants).
 
+- **`wos.WosClient`** — the only Web of Science network boundary (Starter API).
+  Authenticates with the `X-ApiKey` **header**, which is why `HttpLayer` grew
+  `auth_headers`; request headers are in neither the cache key nor the DB, so the
+  guarantee matches the Scopus query-parameter path.
+  - **Starter does not return the SCIE/SSCI/AHCI/ESCI edition.** Neither `Document` nor
+    `Journal` has such a field, and `citations[].db` is the *database* ("WOS", "MEDLINE"),
+    not the edition. So the API **cannot** replace `scie.py`'s Master Journal List ISSN
+    matching — that was the hoped-for win and it is not available. Also absent from
+    Starter (Expanded only): abstracts, author addresses, funding, cited references.
+  - Measured limits, visible in `X-RateLimit-Remaining-Day` / `-Second`: Free Trial
+    1 req/s and 50/day; **Institutional 5 req/s and 5,000/day**; Institutional
+    Integration 20,000/day. Max 50 records per request (51 → HTTP 400). Paging is deep —
+    verified to record 50,000, unlike Scopus's 5,000 ceiling — so `MAX_PAGES` (40) is
+    our own guard against burning the daily budget, not an API limit.
+  - **Two ways to identify an author, with opposite failure modes. Measured on one real
+    researcher whose Scopus record is 244 papers:**
+    - `AI=` (ResearcherID *or* ORCID — both work): **80 records**. Precise, but WoS only
+      links records whose ResearcherID was claimed, so this is a **lower bound**.
+    - `AU=` + `OG=`: **255 records**, of which **176 were a different person** (1970s
+      general-relativity papers) and **none of those 176 carried the ResearcherID**.
+      `AU=` alone was 2,996.
+    Neither number is the researcher's output. `wos_author_documents` therefore always
+    returns a `caveat` naming the strategy and its failure mode, plus an extra `warning`
+    when a name search omits the organization. Keep that — a bare count from either
+    strategy is wrong in a way that a personnel review will not catch.
+  - `parse_document()` returns **the same dict shape as `api.parse_entry`**, so `core`,
+    `scie` and `utils` work on WoS papers unchanged; `source: "wos"` distinguishes them.
+    `tests/test_wos.py` asserts the key sets stay compatible. WoS Times Cited and Scopus
+    citation counts are different corpora — never mix them into one indicator.
+
 - **`core`** — pure functions, no I/O.
   - `compute_indices(citations)` → `(h, g)`.
   - `summarize_papers(papers, year_range)` returns a dict consumed by `utils.print_report_text`
@@ -258,9 +299,10 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
   - `_migrate_if_legacy()` auto-converts old flat-format files (a single researcher per project)
     on load — don't remove this until you're sure no old files exist.
 
-- **`mcp_server`** — MCP (stdio) frontend, 13 tools (the list lives in `_TOOLS`):
+- **`mcp_server`** — MCP (stdio) frontend, 17 tools (the list lives in `_TOOLS`):
   - Data retrieval: `search_author`, `author_profile`, `author_summary`, `list_papers`,
-    `kaken_search_researcher`, `kaken_grants`, `link_kaken_researcher`.
+    `kaken_search_researcher`, `kaken_grants`, `link_kaken_researcher`,
+    `wos_find_document`, `wos_author_documents`.
   - Project persistence: `list_projects`, `read_project`, `create_project`, `delete_project`,
     `save_researcher_section`, `save_comparison` — thin wrappers over `projects.py`.
   - **No evaluation tool, by design** — the host model calls the retrieval tools iteratively

@@ -36,6 +36,7 @@ def _reset_state():
     def _clear():
         mcp_server._scopus_client = None
         mcp_server._kaken_client = None
+        mcp_server._wos_client = None
         mcp_server._project_store = None
         mcp_server._PROJECTS_DIR = None
         mcp_server._INDEX_SETS = {}
@@ -382,6 +383,7 @@ class TestToolRegistry:
             "search_author", "find_papers", "author_profile", "author_summary",
             "list_papers", "kaken_search_researcher", "kaken_grants",
             "link_kaken_researcher",
+            "wos_find_document", "wos_author_documents",
             "list_projects", "read_project", "create_project",
             "delete_project", "save_researcher_section", "save_comparison",
             "cache_stats",

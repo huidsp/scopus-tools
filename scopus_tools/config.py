@@ -17,7 +17,7 @@ from scopus_tools.cachedb import default_state_dir
 logger = logging.getLogger(__name__)
 
 # 設定できるキー。ここに無い名前は受け付けない(打ち間違いを黙って書かないため)。
-KNOWN_KEYS = ("SCOPUS_API_KEY", "KAKEN_APP_ID")
+KNOWN_KEYS = ("SCOPUS_API_KEY", "KAKEN_APP_ID", "WOS_API_KEY")
 
 
 def user_env_path():

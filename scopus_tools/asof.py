@@ -28,6 +28,7 @@ DEFAULT_STALE_DAYS = {
     "scopus_author_retrieval": 90,   # 著者の姓名。ほぼ変わらない
     "kaken_project":          30,    # 採択課題は年度単位で増える
     "kaken_researcher":       90,    # 研究者番号の対応はほぼ変わらない
+    "wos_documents":          30,    # 被引用数が動く。Scopus 側と揃える
 }
 
 # 未知の種別はいちばん厳しい側に倒す(見逃すより警告する)

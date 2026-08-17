@@ -22,7 +22,8 @@ import sys
 
 import requests
 
-from scopus_tools import api, asof, core, httpcache, kaken, linking, projects, scie
+from scopus_tools import (api, asof, core, httpcache, kaken, linking, projects,
+                          scie, wos)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ _STALE_POLICY = None
 # クライアント類は初回ツール呼び出し時に遅延生成する(鍵が無くても起動はできる)
 _scopus_client = None
 _kaken_client = None
+_wos_client = None
 _project_store = None
 
 # 1 回のツール応答で返す論文数の既定上限(トークン爆発の防止)
@@ -117,6 +119,15 @@ def _get_kaken():
     if _kaken_client is None:
         _kaken_client = kaken.KakenClient(context=_get_context())
     return _kaken_client
+
+
+def _get_wos():
+    global _wos_client
+    if not os.getenv("WOS_API_KEY"):
+        raise RuntimeError("WOS_API_KEY is not set (put it in .env or the environment)")
+    if _wos_client is None:
+        _wos_client = wos.WosClient(context=_get_context())
+    return _wos_client
 
 
 @contextlib.contextmanager
@@ -587,6 +598,118 @@ def cache_stats():
     return stats
 
 
+def _wos_payload(fetched, extra, limit):
+    payload = dict(extra)
+    payload.update({
+        "total_count": fetched.expected_total,
+        "returned_count": len(fetched.papers),
+        "truncated": bool(limit and (fetched.expected_total or 0) > limit),
+        "papers": fetched.papers,
+        "source": "wos",
+    })
+    _attach_completeness(payload, fetched)
+    return payload
+
+
+@_network_guard
+def wos_find_document(doi=None, title=None, author_last_name=None, limit=10,
+                      refresh=False):
+    """Web of Science で論文を引き、**著者を ResearcherID 付きで**返す。
+
+    主な用途は `wos_author_documents` に渡す著者識別子の入手。論文を 1 件引いて
+    `authors_detail` の `researcher_id` を読み取り、それを渡せば同姓同名に
+    汚染されない業績一覧が得られる。DOI 指定が最も確実。
+
+    Scopus に無い論文の確認にも使える(WoS にあって Scopus に無い、あるいはその逆)。
+    """
+    try:
+        client = _get_wos()
+    except (RuntimeError, ValueError) as e:
+        return _error(str(e))
+    try:
+        with _fetching(client, refresh) as records:
+            fetched = client.find_documents(doi=doi, title=title,
+                                            author_last_name=author_last_name,
+                                            limit=limit)
+    except ValueError as e:
+        return _error(str(e))
+    payload = _wos_payload(fetched, {
+        "query": {"doi": doi, "title": title, "author_last_name": author_last_name},
+    }, limit)
+    if not fetched.papers and fetched.complete:
+        payload["hint"] = "No match in Web of Science. Try the DOI, or fewer title words."
+    return _with_as_of(payload, records, "wos_documents")
+
+
+@_network_guard
+def wos_author_documents(researcher_id=None, name=None, organization=None,
+                         year_range=None, limit=DEFAULT_PAPER_LIMIT,
+                         scie_only=False, refresh=False):
+    """Web of Science で著者の業績を取得する(WoS の Times Cited 付き)。
+
+    **著者の指定方法で結果の性格が大きく変わる。両方の欠点を理解して使うこと:**
+
+    - `researcher_id`(ResearcherID または ORCID、`AI=` 検索)—— **高精度・低再現率**。
+      本人の記録しか返らないが、ResearcherID が紐付いていない記録は落ちる。
+      実測: ある研究者で 80 件(Scopus では 244 件)。**下限値**として扱うこと。
+    - `name` + `organization`(`AU=` + `OG=`)—— **高再現率・低精度**。
+      実測: 同じ研究者で 255 件だが、うち 176 件は同姓の別人(1970 年代の
+      一般相対論の論文)だった。`organization` を省くとさらに悪化する(2,996 件)。
+
+    つまり **どちらの数字もそのまま業績数として報告してはいけない**。
+    確実なのは、`wos_find_document` で ResearcherID を得てから `researcher_id` で
+    引き、足りない分を DOI 単位で補うこと。
+
+    注意: Starter API は **SCIE / SSCI などの収録版を返さない**。`wos_indexes` は
+    従来どおり ISSN と Master Journal List CSV の突き合わせで付与される。
+    """
+    try:
+        client = _get_wos()
+    except (RuntimeError, ValueError) as e:
+        return _error(str(e))
+    if scie_only and not _INDEX_SETS:
+        return _error("scie_only requires index CSVs (start the server with --scie-list/--scie-dir)")
+    years = _resolve_years(year_range) if year_range else None
+    try:
+        with _fetching(client, refresh) as records:
+            fetched = client.author_documents(
+                researcher_id=researcher_id, name=name, organization=organization,
+                year_range=years, limit=limit)
+    except ValueError as e:
+        return _error(str(e))
+
+    papers = fetched.papers
+    if _INDEX_SETS:
+        scie.annotate_papers_indexes(papers, _INDEX_SETS)
+        if scie_only:
+            papers = [p for p in papers if p.get("wos_indexes")]
+            fetched.papers = papers
+
+    payload = _wos_payload(fetched, {
+        "query": {"researcher_id": researcher_id, "name": name,
+                  "organization": organization, "year_range": years},
+        "strategy": "researcher_id" if researcher_id else "name",
+    }, limit)
+
+    if researcher_id:
+        payload["caveat"] = (
+            "Matched on the author identifier, so these are certainly this person's "
+            "records — but Web of Science only links records whose ResearcherID was "
+            "claimed, so this is a LOWER BOUND on their output, not a total.")
+    else:
+        payload["caveat"] = (
+            "Matched on author name" + (" and organization" if organization else "")
+            + ", which admits same-name researchers — measured at 176 of 255 records "
+              "belonging to a different person in one real case. Do not report this "
+              "count as the researcher's output; get a ResearcherID via "
+              "wos_find_document and re-run with researcher_id.")
+        if not organization:
+            payload["warning"] = (
+                "No organization given. An author-name-only search matched 2,996 "
+                "records for one researcher whose real output is a few hundred.")
+    return _with_as_of(payload, records, "wos_documents")
+
+
 _TOOLS = [
     # データ取得
     search_author,
@@ -597,6 +720,9 @@ _TOOLS = [
     kaken_search_researcher,
     kaken_grants,
     link_kaken_researcher,
+    # Web of Science(WoS の Times Cited。収録版は返らないので scie.py は併用)
+    wos_find_document,
+    wos_author_documents,
     # プロジェクト永続化
     list_projects,
     read_project,

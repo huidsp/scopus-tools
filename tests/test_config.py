@@ -127,7 +127,7 @@ class TestParseAssignments:
 class TestDescribe:
     def test_reports_missing_keys(self, env_path):
         config.set_keys({"SCOPUS_API_KEY": "abc"})
-        assert config.describe()["missing"] == ["KAKEN_APP_ID"]
+        assert config.describe()["missing"] == ["KAKEN_APP_ID", "WOS_API_KEY"]
 
     def test_flags_world_readable(self, env_path):
         config.set_keys({"SCOPUS_API_KEY": "abc"})

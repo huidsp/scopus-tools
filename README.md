@@ -53,6 +53,7 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 - 取得が途中で切れた場合の検出(切り詰めた論文リストを完全な業績として扱わない)
 - MCP クライアントへの登録の自動化(`mcp-setup`)
 - タイトル / DOI から論文を引き、**分裂した Author ID を特定して合算**
+- Web of Science の被引用数(Times Cited)と ResearcherID による著者特定
 
 ---
 
@@ -82,7 +83,8 @@ WoS 収録インデックスも使う場合は、CSV を `~/.scopus-tools/index/
 ## 必要要件
 
 - Python 3.12 以上
-- API キー: `SCOPUS_API_KEY`(必須)、`KAKEN_APP_ID`(科研費機能を使う場合)
+- API キー: `SCOPUS_API_KEY`(必須)、`KAKEN_APP_ID`(科研費機能を使う場合)、
+  `WOS_API_KEY`(Web of Science 機能を使う場合)
 - 依存は `requests` と `python-dotenv` のみ(CLI で 16MB、MCP 込みで 54MB)
 
 ---
@@ -142,6 +144,8 @@ CLI と同じ内部ロジックを、ホスト側モデルから呼べる形で�
 | `kaken_search_researcher` | `name` | KAKEN(NRID)研究者候補の検索 |
 | `kaken_grants` | `researcher_id`, `role` | 研究者番号から科研費課題一覧 |
 | `link_kaken_researcher` | `first_name`, `last_name`, `auto` | Scopus 氏名 → KAKEN 研究者番号の自動照合 |
+| `wos_find_document` | `doi`, `title`, `author_last_name`, `limit` | WoS で論文を引き、**著者を ResearcherID 付きで**返す |
+| `wos_author_documents` | `researcher_id`, `name`, `organization`, `year_range`, `limit`, `scie_only` | WoS の業績一覧(**WoS の Times Cited** 付き)。著者の指定方法で性格が変わる(下記) |
 | `cache_stats` | — | キャッシュの状態と Elsevier クォータの残量 |
 
 取得系ツールはすべて `refresh`(既定 false)を受け、応答に `as_of` / `as_of_note`
@@ -192,6 +196,60 @@ scopus-tools find --title "論文タイトルの一部"
 
 scopus-tools summary <既知のID>,<新しいID> --years 2018-2026
 ```
+
+### Web of Science
+
+WoS 契約機関のネットワークから [developer.clarivate.com](https://developer.clarivate.com/apis/wos-starter)
+でアプリ登録すると鍵が発行されます。**登録時の IP でプランが決まる**ため、必ず学内から
+行ってください。
+
+```bash
+scopus-tools config WOS_API_KEY=your_key
+```
+
+実測したレート制限（レスポンスの `X-RateLimit-Remaining-Day` / `-Second` で確認できます）:
+
+| プラン | req/秒 | req/日 |
+|---|---:|---:|
+| Free Trial | 1 | 50 |
+| **Institutional Member**（契約機関） | **5** | **5,000** |
+| Institutional Integration | 5 | 20,000 |
+
+1 リクエスト最大 50 件。46 名分でも 250 リクエスト程度なので日次上限には当たりません。
+
+#### 取れるもの・取れないもの
+
+Starter API で取れるのは、WoS UID・タイトル・著者（表示名・ResearcherID・**著者順**）・
+誌名・巻号ページ・DOI/ISSN・著者キーワード・文献タイプ・**Times Cited**（契約機関のみ）、
+および引用文献/被引用文献への **URL** です。
+
+**SCIE / SSCI / AHCI / ESCI の収録版は返りません。** `Document` にも `Journal` にも
+該当フィールドが無く、`citations[].db` は「WOS」等のデータベース名であって版ではありません。
+したがって収録区分の判定は従来どおり
+[Master Journal List の CSV による ISSN 突き合わせ](#web-of-science-収録インデックスの判定)が必要です。
+抄録・所属住所・助成金・引用文献本体も Expanded 契約が必要です。
+
+#### 注意: 著者の特定方法で結果が大きく変わります
+
+ある研究者（Scopus では 244 件）で実測した結果:
+
+| 指定方法 | 件数 | 性格 |
+|---|---:|---|
+| `--rid`（ResearcherID / ORCID、`AI=`) | **80** | 高精度・**低再現率**。本人の記録だけだが、ResearcherID が紐付いていない記録は落ちる |
+| `--name` + `--org`（`AU=`+`OG=`) | **255** | 高再現率・**低精度**。うち 176 件は同姓の別人（1970 年代の一般相対論の論文）で、当該 ResearcherID を持つものは 0 件 |
+| `--name` のみ | 2,996 | 使えない |
+
+**どちらの数字もそのまま業績数として報告できません。** 確実な手順は:
+
+```bash
+# 1. 本人の論文を 1 件引いて ResearcherID を得る
+scopus-tools wos --doi 10.1000/example
+
+# 2. その ID で業績を引く(下限値として扱う)
+scopus-tools wos --rid D-0000-2011 --years 2021-2025
+```
+
+MCP ツールは応答に必ず `caveat` を付け、どちらの方法を使ったかとその弱点をモデルに伝えます。
 
 ### 登録(インストール)
 
@@ -493,6 +551,23 @@ article-number / DOI / オープンアクセス / 所属機関 / キーワード
 
 主な用途は [分裂した Author ID をまとめる](#分裂した-author-id-をまとめる)ことです。
 タイトルの照合は緩く先頭数語や綴り違いでも当たるので、複数出たら誌名・年で確認してください。
+
+### `wos` — Web of Science 検索
+
+```bash
+# ResearcherID / ORCID で業績(推奨)
+scopus-tools wos --rid D-0000-2011 --years 2021-2025
+
+# 氏名 + 機関(同姓同名が混ざる。--org は必須と考えてよい)
+scopus-tools wos --name "Yamada T" --org "Hiroshima University"
+
+# DOI / タイトルから論文を引く(著者の ResearcherID が分かる)
+scopus-tools wos --doi 10.1000/example
+scopus-tools wos --title "Software reliability analysis"
+```
+
+`--format json`、`--output PATH`、`--limit` も使えます。
+注意点は [Web of Science](#web-of-science) を参照。
 
 ### `batch` — CSV 入出力の一括サマリ
 

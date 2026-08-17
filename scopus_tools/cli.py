@@ -6,7 +6,8 @@ import os
 import subprocess
 import sys
 from dotenv import find_dotenv, load_dotenv
-from scopus_tools import api, asof, cachedb, config, core, httpcache, mcp_setup, utils, kaken, scie
+from scopus_tools import (api, asof, cachedb, config, core, httpcache, kaken,
+                          mcp_setup, scie, utils, wos)
 
 
 # どのサブコマンドにどの環境変数が必須か。
@@ -18,6 +19,7 @@ KEY_REQUIREMENTS = {
     "papers":        ["SCOPUS_API_KEY"],
     "batch":         ["SCOPUS_API_KEY"],
     "find":          ["SCOPUS_API_KEY"],
+    "wos":           ["WOS_API_KEY"],
     "kaken-search":  ["KAKEN_APP_ID"],
     "kaken-summary": ["KAKEN_APP_ID"],
     "mcp":           [],
@@ -270,6 +272,24 @@ def main():
     find_p.add_argument("--output", default=None,
                         help="Write to file path instead of stdout")
 
+    # 4c. wos (Web of Science Starter)
+    wos_p = subparsers.add_parser(
+        "wos", help="Query Web of Science (Times Cited, ResearcherID)")
+    wos_p.add_argument("--rid", dest="researcher_id", default=None,
+                       help="ResearcherID or ORCID (AI= search; precise but only "
+                            "covers records linked to that identifier)")
+    wos_p.add_argument("--name", default=None,
+                       help="Author name (AU= search; use with --org, it matches "
+                            "same-name researchers otherwise)")
+    wos_p.add_argument("--org", default=None, help="Organization (OG=)")
+    wos_p.add_argument("--years", default=None, help=YEAR_RANGE_HELP)
+    wos_p.add_argument("--doi", default=None, help="Look up one document by DOI")
+    wos_p.add_argument("--title", default=None, help="Look up documents by title")
+    wos_p.add_argument("--limit", type=int, default=200, help="Max records (default: 200)")
+    wos_p.add_argument("--format", choices=["text", "json"], default="text",
+                       help="Output format (default: text)")
+    wos_p.add_argument("--output", default=None, help="Write to file path instead of stdout")
+
     # 5. kaken-search (科研費 KAKEN: 研究者検索)
     ks_p = subparsers.add_parser("kaken-search", help="Search KAKEN researcher by name or number")
     ks_p.add_argument("--name", help="Researcher full name (e.g., 'Victor Parque')")
@@ -481,6 +501,51 @@ def _config_command(args, parser):
     if info["world_readable"]:
         print(f"\nWARNING: {info['path']} is readable by other users. "
               f"Run: chmod 600 {info['path']}")
+
+
+def _wos_command(args, parser, http_ctx):
+    """wos サブコマンド: 著者の業績、または DOI/タイトルからの論文引き。"""
+    client = wos.WosClient(context=http_ctx)
+    years = _parse_year_range(args.years, parser) if args.years else None
+    try:
+        if args.doi or args.title:
+            fetched = client.find_documents(doi=args.doi, title=args.title,
+                                            limit=args.limit)
+        elif args.researcher_id or args.name:
+            fetched = client.author_documents(
+                researcher_id=args.researcher_id, name=args.name,
+                organization=args.org, year_range=years, limit=args.limit)
+        else:
+            parser.error("wos: give --rid / --name / --doi / --title")
+    except ValueError as e:
+        parser.error(f"wos: {e}")
+
+    if not fetched.complete:
+        print(f"WARNING: {fetched.reason}", file=sys.stderr)
+    if args.format == "json":
+        _emit_json({"total_count": fetched.expected_total,
+                    "returned_count": len(fetched.papers),
+                    "papers": fetched.papers}, args.output)
+        return
+
+    print(f"{fetched.expected_total} records matched, showing {len(fetched.papers)}")
+    for p in fetched.papers:
+        pos = ""
+        if p["author_position"]:
+            pos = f"  {p['author_position']}/{p['author_count']}"
+            if p["author_position"] == 1:
+                pos += " (first)"
+        print(f"  {p['year']}  cited={p['citations']:<5} "
+              f"{(p['journal'] or '')[:34]:36}{(p['title'] or '')[:40]}{pos}")
+    if args.doi or args.title:
+        for p in fetched.papers:
+            print(f"\n  {p['title']}")
+            for a in p["authors_detail"]:
+                print(f"     {a['name']:26} researcher_id={a['researcher_id'] or '-'}")
+    sys.stdout.flush()
+    if args.name and not args.researcher_id:
+        print("\nNOTE: an AU= search matches same-name researchers. Get a ResearcherID "
+              "with --doi/--title, then re-run with --rid.", file=sys.stderr)
 
 
 def _mcp_setup_command(args, parser):
@@ -830,6 +895,9 @@ def _dispatch(args, parser, http_ctx):
         client = api.ScopusClient(context=http_ctx)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         utils.process_batch_summary(args.input, args.output, client, year_range=year_range)
+
+    elif args.command == "wos":
+        _wos_command(args, parser, http_ctx)
 
     elif args.command == "find":
         client = api.ScopusClient(context=http_ctx)
