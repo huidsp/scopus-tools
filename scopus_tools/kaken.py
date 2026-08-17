@@ -1,7 +1,8 @@
 import os
 import logging
 import xml.etree.ElementTree as ET
-import requests
+
+from scopus_tools.httpcache import HttpLayer
 
 logger = logging.getLogger(__name__)
 
@@ -17,17 +18,28 @@ class KakenClient:
     PROJECT_ENDPOINT = "https://kaken.nii.ac.jp/opensearch/"
     RESEARCHER_ENDPOINT = "https://nrid.nii.ac.jp/opensearch/"
 
-    def __init__(self, app_id=None):
+    def __init__(self, app_id=None, http=None, context=None):
         self.app_id = app_id or os.getenv("KAKEN_APP_ID")
         if not self.app_id:
             raise ValueError("KAKEN_APP_ID is not set.")
+        # appid は HttpLayer が保持し、キャッシュキー算出後に注入する
+        # (appid がキャッシュ DB に書き込まれないようにするため)。
+        auth = {"appid": self.app_id}
+        if http is not None:
+            self._http = http
+        elif context is not None:
+            self._http = context.layer_for(auth)
+        else:
+            self._http = HttpLayer(auth_params=auth)
         logger.debug("KakenClient initialized.")
 
     def _request(self, url, params):
-        params = {**params, "appid": self.app_id}
-        safe_params = {k: v for k, v in params.items() if k != "appid"}
-        logger.debug("Requesting %s with params %s", url, safe_params)
-        resp = requests.get(url, params=params, headers={"User-Agent": "scopus-tools/kaken-client"})
+        """GET して成功レスポンスを返す。失敗なら None(既存の契約を維持)。"""
+        api = ("kaken_researcher" if url == self.RESEARCHER_ENDPOINT else "kaken_project")
+        logger.debug("Requesting %s with params %s", url, params)
+        resp = self._http.get(url, params=params,
+                              headers={"User-Agent": "scopus-tools/kaken-client"},
+                              api=api)
         if resp.status_code != 200:
             snippet = resp.text[:300].replace("\n", " ")
             logger.warning("KAKEN request failed: status=%s body=%s", resp.status_code, snippet)

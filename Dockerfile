@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.6
 
 # ---- Base ----------------------------------------------------------------
-# Python 3.11 slim:
+# Python 3.12 slim:
+#   - パッケージの requires-python (>=3.12) に合わせる.
 #   - Avoids the LibreSSL/urllib3 警告 (macOS 環境固有).
-#   - gradio / huggingface_hub の新しめのバージョンとも互換.
-FROM python:3.11-slim AS base
+FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -25,29 +25,35 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY scopus_tools ./scopus_tools
 
-# `[ui]` extra で gradio を入れる. test 依存は本番イメージには入れない.
+# `[mcp]` extra で MCP SDK を入れる. test 依存は本番イメージには入れない.
 RUN pip install --upgrade pip \
- && pip install ".[ui]"
+ && pip install ".[mcp]"
 
 # ---- Runtime -------------------------------------------------------------
 # 非 root ユーザで実行
 RUN useradd --create-home --uid 1000 appuser \
- && mkdir -p /data/projects /data/index \
+ && mkdir -p /data/projects /data/index /data/cache \
  && chown -R appuser:appuser /data
 USER appuser
 
-# WebUI のデフォルトポート
-EXPOSE 7860
+# レスポンスキャッシュはコンテナ外に置く(でないと毎回クォータを消費し直す).
+ENV SCOPUS_TOOLS_CACHE_DB=/data/cache/cache.sqlite3
 
-# プロジェクト JSON の永続化と, WoS インデックス CSV(SCIE/SSCI/AHCI/ESCI)用のボリューム.
+# プロジェクト JSON・キャッシュの永続化と, WoS インデックス CSV 用のボリューム.
 # index 側は `./index:/data/index` をマウントして CSV を置く運用.
-VOLUME ["/data/projects", "/data/index"]
+VOLUME ["/data/projects", "/data/index", "/data/cache"]
 
 # tini で PID 1 を引き取り, シグナルを正しく伝搬させる.
 ENTRYPOINT ["/usr/bin/tini", "--", "scopus-tools"]
 
-# デフォルトは WebUI 起動. コンテナ外からアクセスできるよう 0.0.0.0 にバインド.
-# CLI を使いたいときは `docker run ... search --name "..."` のように上書き可能.
-CMD ["webui", "--host", "0.0.0.0", "--port", "7860", \
-     "--projects-dir", "/data/projects", \
-     "--scie-dir", "/data/index"]
+# サブコマンドは実行時に指定する. ネットワークポートは公開しない
+# (MCP は stdio なので常駐サービスにはならない).
+#
+#   MCP サーバとして (MCP クライアントから起動される):
+#     docker run -i --rm --env-file .env \
+#       -v ./index:/data/index:ro -v ./projects:/data/projects \
+#       scopus-tools mcp --scie-dir /data/index --projects-dir /data/projects
+#
+#   CLI として:
+#     docker run --rm --env-file .env scopus-tools search --name "Taro Tanaka"
+CMD ["--help"]

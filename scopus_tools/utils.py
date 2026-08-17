@@ -1,6 +1,6 @@
+import csv
 import logging
 import sys
-import pandas as pd
 from scopus_tools.core import resolve_year_range
 
 # レポート表示の共通定数 / ヘルパー。
@@ -48,23 +48,76 @@ def format_wos_indexes(p):
     return ""
 
 
-def setup_logging(level=logging.INFO):
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+# DEBUG にすると完全な URL をログに出すライブラリ。Scopus は apiKey を
+# クエリパラメータで渡すため、これを抑えないと API キーがそのままログに残る。
+# MCP サーバの stderr は MCP クライアントがログファイルに保存する(場合によっては
+# 誰でも読める権限で)ので、実害がある。
+_URL_LOGGING_LIBRARIES = ("urllib3", "requests", "httpx", "httpcore")
+
+
+def setup_logging(level=logging.INFO, stream=None):
+    """ロギングを初期化する。
+
+    stream を渡すと既存ハンドラを置き換えてそのストリームに固定する
+    (MCP サーバのように stdout を汚せない場合に stderr を明示するため)。
+
+    アプリ側を DEBUG にしても API キーが漏れないよう、URL を丸ごと出力する
+    ライブラリのロガーは WARNING に固定する。
+    """
+    kwargs = {
+        "level": level,
+        "format": '%(asctime)s - %(levelname)s - %(message)s',
+    }
+    if stream is not None:
+        kwargs["stream"] = stream
+        kwargs["force"] = True
+    logging.basicConfig(**kwargs)
+    silence_url_logging()
+
+
+def silence_url_logging():
+    """URL を丸ごとログに出すライブラリを WARNING に落とす(API キー漏洩の防止)。
+
+    `setup_logging` を経由しない呼び出し側(ライブラリとして import した場合など)
+    からも直接呼べるようにしておく。
+    """
+    for name in _URL_LOGGING_LIBRARIES:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+class CsvRows(list):
+    """CSV を読んだ結果。dict の list に列名 `columns` を添えたもの。
+
+    以前は pandas の DataFrame を返していた。呼び出し側が使っていたのは
+    `.columns` と行の反復だけなので、標準ライブラリの csv で置き換えている
+    (pandas + numpy で 104MB あり、用途に対して重すぎた)。
+    """
+
+    def __init__(self, rows=(), columns=()):
+        super().__init__(rows)
+        self.columns = list(columns)
+
 
 def read_input_csv(file_path, required_cols=None):
-    """CSVを読み込む。required_cols を指定すると不足列があれば ValueError を上げる。"""
-    df = pd.read_csv(file_path)
+    """CSVを読み込む。required_cols を指定すると不足列があれば ValueError を上げる。
+
+    戻り値は `CsvRows`(dict の list + `.columns`)。空セルは空文字になる
+    (pandas 時代の NaN ではない)。
+    """
+    with open(file_path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        columns = [c for c in (reader.fieldnames or []) if c is not None]
+        rows = [
+            {k: ("" if v is None else v) for k, v in row.items() if k is not None}
+            for row in reader
+        ]
     if required_cols:
-        missing = [c for c in required_cols if c not in df.columns]
+        missing = [c for c in required_cols if c not in columns]
         if missing:
             raise ValueError(
                 f"Input CSV '{file_path}' is missing required column(s): "
-                f"{', '.join(missing)}. Found columns: {', '.join(df.columns)}"
+                f"{', '.join(missing)}. Found columns: {', '.join(columns)}"
             )
-    return df
+    return CsvRows(rows, columns)
 
 
 def progress(msg):
@@ -81,9 +134,32 @@ def progress_done():
         print("", file=sys.stderr, flush=True)
 
 def save_output_csv(data_list, file_path):
-    """リスト形式のデータをCSVとして保存する"""
-    df = pd.DataFrame(data_list)
-    df.to_csv(file_path, index=False, encoding='utf-8-sig')
+    """リスト形式のデータをCSVとして保存する。
+
+    列は **全行のキーの和集合**(出現順)。pandas の `DataFrame(list).to_csv()` が
+    そうしていたので、行ごとにキーが違っても列が落ちない挙動を保つ。
+    """
+    fieldnames = []
+    for row in data_list or []:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    write_csv(data_list, file_path, fieldnames)
+
+
+def write_csv(rows, file_path, fieldnames):
+    """dict の list を CSV に書き出す。
+
+    - `utf-8-sig`: Excel で日本語が化けないようにするため(従来どおり)。
+    - `lineterminator="\\n"`: csv モジュールの既定は CRLF だが、pandas 時代の出力は
+      LF だった。既存の出力と 1 バイトも変えないために LF を明示する。
+    """
+    with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore",
+                                lineterminator="\n")
+        writer.writeheader()
+        for row in rows or []:
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
 
 def print_author_results(name, results):
     """著者検索結果をコンソールに表示する"""
@@ -101,15 +177,38 @@ def print_author_results(name, results):
         print(f"  Documents  : {r['doc_count']}")
         print(_hr("-"))
 
-def process_author_csv(input_path, output_path, client):
-    """CSV の Name 列を一括検索して所属機関別に Scopus ID をまとめたCSVを出力する"""
-    df = read_input_csv(input_path, required_cols=["Name"])
+def process_author_csv(input_path, output_path, client, try_both=False):
+    """CSV を一括検索して所属機関別に Scopus ID をまとめた CSV を出力する。
+
+    `First Name` / `Last Name` 列があればそれを使い(1 リクエスト、姓名の取り違えなし)、
+    無ければ `Name` 列を空白で分割して **given surname の順を仮定**する。
+    仮定した場合は 1 度だけ警告を出す。
+    """
+    df = read_input_csv(input_path)
+    has_split = "First Name" in df.columns and "Last Name" in df.columns
+    if not has_split:
+        missing = [c for c in ["Name"] if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"Input CSV '{input_path}' needs either a 'Name' column or both "
+                f"'First Name' and 'Last Name' columns. Found: {', '.join(df.columns)}"
+            )
+        print("Note: assuming the 'Name' column is 'given-name surname'. "
+              "Add 'First Name'/'Last Name' columns to be explicit.", file=sys.stderr)
+
     total = len(df)
     rows = []
-    for idx, row in enumerate(df.itertuples(index=False), start=1):
-        name = str(getattr(row, "Name"))
-        progress(f"[{idx}/{total}] searching: {name}")
-        found = client.search_author_by_name(name)
+    for idx, row in enumerate(df, start=1):
+        if has_split:
+            first = str(row["First Name"] or "").strip()
+            last = str(row["Last Name"] or "").strip()
+            name = f"{first} {last}".strip()
+            progress(f"[{idx}/{total}] searching: {name}")
+            found = client.search_author(first, last)
+        else:
+            name = str(row["Name"])
+            progress(f"[{idx}/{total}] searching: {name}")
+            found = client.search_author_by_name(name, try_both=try_both)
         # 所属機関別にIDをグループ化（旧 get_author.py の process_csv と同等）
         affiliation_dict = {}
         for author in found:
@@ -232,6 +331,8 @@ def save_papers_csv(rows, output_path):
         "Name", "Scopus IDs", "Year", "Title", "Authors", "Journal",
         "ISSN", "eISSN", "Volume", "Issue", "Pages", "Type", "Citations",
         "Author Position", "Author Count", "First Author", "EID",
+        # 新しい列は末尾に足す(既存の列順を変えると下流の処理が壊れるため)
+        "DOI", "Article Number", "Open Access",
     ]
     if has_wos:
         fieldnames.append("WoS Index")
@@ -259,12 +360,56 @@ def save_papers_csv(rows, output_path):
                 "Author Count": p.get("author_count", ""),
                 "First Author": "Yes" if p.get("is_first_author") else "",
                 "EID": p.get("eid", ""),
+                "DOI": p.get("doi", ""),
+                "Article Number": p.get("article_number", ""),
+                "Open Access": "Yes" if p.get("open_access") else "",
             }
             if has_wos:
                 row["WoS Index"] = "|".join(p.get("wos_indexes") or [])
             out.append(row)
-    df = pd.DataFrame(out, columns=fieldnames)
-    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    write_csv(out, output_path, fieldnames)
+
+
+def print_found_papers(papers, total=None):
+    """`find` の結果を表示する。**著者は Scopus Author ID 付き**で並べる。
+
+    この機能の主目的が「分裂した Author ID の特定」なので、ID が読み取れる形にする。
+    """
+    if not papers:
+        print("該当する論文がありません。語数を減らすか、DOI を指定してください。")
+        return
+    if total is not None and total > len(papers):
+        print(f"{total} 件が該当し、うち {len(papers)} 件を表示します。\n")
+    for i, p in enumerate(papers):
+        if i > 0:
+            print(_hr("-"))
+        print(f"{p.get('title', '')}")
+        bits = [b for b in (p.get("journal"), str(p.get("year") or ""),
+                            f"Vol.{p['volume']}" if p.get("volume") else "",
+                            f"No.{p['issue']}" if p.get("issue") else "",
+                            f"pp.{p['pages']}" if p.get("pages") else "",
+                            f"Art.{p['article_number']}" if p.get("article_number") else "") if b]
+        print("  " + " / ".join(bits))
+        meta = [f"{p.get('type', '')}", f"被引用 {p.get('citations', 0)}"]
+        if p.get("doi"):
+            meta.append(f"DOI {p['doi']}")
+        if p.get("issn") or p.get("eissn"):
+            meta.append(f"ISSN {p.get('issn') or '-'} / eISSN {p.get('eissn') or '-'}")
+        if p.get("open_access"):
+            meta.append("OA")
+        print("  " + " | ".join(m for m in meta if m))
+        print("  著者:")
+        for a in p.get("authors_detail") or []:
+            orcid = f"  ORCID {a['orcid']}" if a.get("orcid") else ""
+            print(f"    {str(a.get('name') or ''):20} authid={a.get('authid')}{orcid}")
+        affs = [af.get("name") for af in (p.get("affiliations") or []) if af.get("name")]
+        if affs:
+            print(f"  所属: {', '.join(affs)}")
+        if p.get("keywords"):
+            print(f"  キーワード: {', '.join(p['keywords'])}")
+        if p.get("abstract"):
+            print(f"  抄録: {p['abstract'][:300]}...")
+        print(f"  EID : {p.get('eid', '')}")
 
 
 def print_kaken_researcher_results(query, results):
@@ -372,7 +517,7 @@ def process_batch_summary(input_path, output_path, client, year_range=None):
     df = read_input_csv(input_path, required_cols=["Scopus ID"])
     total = len(df)
     results = []
-    for idx, (_, row) in enumerate(df.iterrows(), start=1):
+    for idx, row in enumerate(df, start=1):
         name = row.get("Name", "")
         scopus_id_value = row.get("Scopus ID")
         affiliation = row.get("Affiliation", "")

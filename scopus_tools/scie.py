@@ -10,11 +10,10 @@ Scopus 自体には『どの WoS インデックスに収録されているか�
 外部リストは登録制で自動取得できないため、パスはユーザが明示的に渡す。
 """
 
+import csv
 import logging
 import os
 import re
-
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -47,37 +46,45 @@ def load_scie_issn_set(path):
     フォールバックとして、CSV として読めない単純なテキスト(1 行 1 ISSN)も受け付ける。
     """
     issns = set()
-    try:
-        df = pd.read_csv(path, dtype=str, keep_default_na=False)
-    except Exception:
-        df = None
 
-    if df is not None and len(df.columns) > 0:
-        issn_cols = [c for c in df.columns if "issn" in str(c).lower()]
-        cols = issn_cols or list(df.columns)
-        for col in cols:
-            for cell in df[col]:
-                for tok in _split_issns(cell):
-                    n = normalize_issn(tok)
-                    if n:
-                        issns.add(n)
-        if issn_cols:
-            logger.debug("SCIE list: matched ISSN columns=%s", issn_cols)
-        else:
-            # ISSN 列名が無い場合、ヘッダ自体が ISSN(ヘッダ無しファイルを
-            # pandas が 1 行目をヘッダとして読んだ)可能性があるので列名も拾う。
-            for col in df.columns:
-                for tok in _split_issns(col):
-                    n = normalize_issn(tok)
-                    if n:
-                        issns.add(n)
-    else:
-        with open(path, encoding="utf-8-sig") as f:
+    def _add(value):
+        for tok in _split_issns(value):
+            n = normalize_issn(tok)
+            if n:
+                issns.add(n)
+
+    header = []
+    rows = []
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            for i, row in enumerate(reader):
+                if i == 0:
+                    header = row
+                else:
+                    rows.append(row)
+    except (OSError, csv.Error, UnicodeDecodeError) as e:
+        logger.warning("Could not read %s as CSV (%s); treating it as one ISSN per line", path, e)
+        header, rows = [], []
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
             for line in f:
-                for tok in _split_issns(line):
-                    n = normalize_issn(tok)
-                    if n:
-                        issns.add(n)
+                _add(line)
+
+    if header:
+        issn_idx = [i for i, name in enumerate(header) if "issn" in str(name).lower()]
+        cols = issn_idx or list(range(len(header)))
+        for row in rows:
+            for i in cols:
+                if i < len(row):
+                    _add(row[i])
+        if issn_idx:
+            logger.debug("SCIE list: matched ISSN columns=%s",
+                         [header[i] for i in issn_idx])
+        else:
+            # ISSN 列名が無い場合、ヘッダ行自体が ISSN(ヘッダ無しファイルの
+            # 1 行目を見出しとして読んだ)可能性があるので、見出しも値として拾う。
+            for name in header:
+                _add(name)
 
     logger.info("Loaded %d unique SCIE ISSNs from %s", len(issns), path)
     return issns
@@ -126,6 +133,36 @@ def load_index_sets(paths):
         sets[label] = sets.get(label, set()) | issns
         logger.info("Index '%s': %d ISSNs (from %s)", label, len(issns), path)
     return sets
+
+
+def resolve_index_paths(scie_list=None, scie_dir=None):
+    """WoS インデックス CSV のパス群を解決する(順序維持・重複除去)。
+
+    優先順位:
+      1. scie_list … 明示されたファイルパス群をそのまま使う。
+      2. scie_dir  … そのディレクトリ内の `*.csv` をすべて読む(index 専用フォルダ想定。
+                      Docker では `/data/index` をマウントする運用)。
+      3. 自動検出 … カレントの `*Citation Index*.csv` と `index/*.csv`。
+    """
+    import glob
+
+    if scie_list:
+        paths = list(scie_list)
+    elif scie_dir:
+        paths = sorted(glob.glob(os.path.join(scie_dir, "*.csv")))
+    else:
+        paths = (sorted(glob.glob("*Citation Index*.csv"))
+                 + sorted(glob.glob(os.path.join("index", "*.csv"))))
+    return list(dict.fromkeys(paths))
+
+
+def discover_index_sets(scie_list=None, scie_dir=None):
+    """`resolve_index_paths` で見つけた CSV を読み込み {インデックス名: ISSN集合} を返す。
+
+    MCP サーバの起動時ロード(`mcp_server.run`)の入口。
+    """
+    paths = resolve_index_paths(scie_list=scie_list, scie_dir=scie_dir)
+    return load_index_sets(paths) if paths else {}
 
 
 def annotate_papers_indexes(papers, index_sets):
