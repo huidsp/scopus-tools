@@ -217,15 +217,25 @@ scopus-tools summary <既知のID>,<新しいID> --years 2018-2026
 上の 3 点(絶対パス・鍵の受け渡し・TCC 保護パスの回避)を自動でやります。
 
 ```bash
-# TCC 保護外にインストールする(~/.local は Claude Desktop の PATH にも入っている)
-uv tool install "scopus_tools[mcp] @ /path/to/scopus-tools"
+# 1. インストール。GitHub から直接入れればパスを書く必要がありません
+uv tool install "scopus_tools[mcp] @ git+https://github.com/huidsp/scopus-tools.git"
 
-# 索引 CSV も TCC 保護外へ
-mkdir -p ~/.scopus-tools/index && cp /path/to/scopus-tools/index/*.csv ~/.scopus-tools/index/
+# 手元のクローンから入れる場合(未 push の変更を試すとき)は、そのディレクトリを指定します。
+# uv は wheel をビルドして ~/.local に入れるので、**クローンの場所は ~/Documents でも構いません**
+#   uv tool install "scopus_tools[mcp] @ ~/path/to/cloned/scopus-tools"
 
-scopus-tools mcp-setup --scope user --scie-dir ~/.scopus-tools/index
-scopus-tools mcp-setup --claude-desktop --scie-dir ~/.scopus-tools/index
+# 2. WoS 索引 CSV は TCC 保護外に置く(**これは実行時に読むので場所が重要**)
+mkdir -p ~/.scopus-tools/index && cp <クローン先>/index/*.csv ~/.scopus-tools/index/
+
+# 3. 登録
+scopus-tools mcp-setup --scope user --scie-dir ~/.scopus-tools/index      # Claude Code
+scopus-tools mcp-setup --claude-desktop --scie-dir ~/.scopus-tools/index  # Claude Desktop
 ```
+
+> **TCC で問題になるのは「実行時に読むパス」だけ**です。`uv tool install` は実行ファイルを
+> 必ず `~/.local`(保護外)に置くので、**インストール元のクローンがどこにあっても構いません**。
+> 一方、**索引 CSV は実行時に読む**ので `~/Documents` に置いたままだと Claude Desktop から
+> 読めません。`mcp-setup` はこれを検出して登録を拒否します。
 
 自分の絶対パスを解決し、`.env` や環境変数から API キーを読んで登録します。
 **鍵をどのファイルに平文で書いたかは実行時に必ず表示されます。**

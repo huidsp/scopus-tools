@@ -284,6 +284,10 @@ Both clients send through **one** `httpcache.HttpLayer`, minted per-client from 
     This actually happened — Claude Code (terminal, has permission) connected fine while
     Claude Desktop could not start the server at all, so it is easy to miss. Install via
     `uv tool install` (`~/.local`) and keep the index CSVs in `~/.scopus-tools/index`.
+    Only paths **read at run time** matter: uv builds a wheel and copies it into `~/.local`,
+    so the source clone may sit in `~/Documents` — the installed tree holds no reference back
+    to it. The index CSVs are different: they are opened on every start, so their location
+    does matter.
 
 - **`cli`** — argparse dispatch only; no business logic.
   - `KEY_REQUIREMENTS` is a static map consumed by `_check_required_keys`. `mcp` maps to an
