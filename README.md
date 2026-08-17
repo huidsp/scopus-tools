@@ -26,7 +26,6 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 - [API キーの取得と設定](#api-キーの取得と設定)
   - [Scopus API キー (`SCOPUS_API_KEY`)](#scopus-api-キー-scopus_api_key)
   - [CiNii アプリケーション ID (`KAKEN_APP_ID`)](#cinii-アプリケーション-id-kaken_app_id)
-  - [OpenAlex(`OPENALEX_MAILTO`、任意)](#openalex-で-scopus-の収録外を補う)
   - [`.env` ファイルの作成](#env-ファイルの作成)
 - [年範囲の指定](#年範囲の指定)
 - [CLI リファレンス](#cli-リファレンス)
@@ -54,7 +53,6 @@ Elsevier Scopus API と 科研費 (KAKEN) API から研究者の業績データ�
 - 取得が途中で切れた場合の検出(切り詰めた論文リストを完全な業績として扱わない)
 - MCP クライアントへの登録の自動化(`mcp-setup`)
 - タイトル / DOI から論文を引き、**分裂した Author ID を特定して合算**
-- OpenAlex による Scopus 収録外の補完(認証不要。学外ネットワークでも使える)
 
 ---
 
@@ -144,9 +142,6 @@ CLI と同じ内部ロジックを、ホスト側モデルから呼べる形で�
 | `kaken_search_researcher` | `name` | KAKEN(NRID)研究者候補の検索 |
 | `kaken_grants` | `researcher_id`, `role` | 研究者番号から科研費課題一覧 |
 | `link_kaken_researcher` | `first_name`, `last_name`, `auto` | Scopus 氏名 → KAKEN 研究者番号の自動照合 |
-| `openalex_search_author` | `name`, `institution_ror`, `limit` | OpenAlex 著者候補。**認証不要**。各候補に過剰マージの疑い度 `merge_risk` が付く |
-| `openalex_author_works` | `author_id`, `institution_ror`, `year_range`, `limit`, `scie_only` | OpenAlex の業績一覧。**機関 ROR か年範囲の指定が必須**(下記) |
-| `openalex_find_paper` | `doi`, `title`, `limit`, `include_abstract` | DOI / タイトルから論文を引く。Scopus 未収録かどうかの確認に使える |
 | `cache_stats` | — | キャッシュの状態と Elsevier クォータの残量 |
 
 取得系ツールはすべて `refresh`(既定 false)を受け、応答に `as_of` / `as_of_note`
@@ -197,56 +192,6 @@ scopus-tools find --title "論文タイトルの一部"
 
 scopus-tools summary <既知のID>,<新しいID> --years 2018-2026
 ```
-
-### OpenAlex で Scopus の収録外を補う
-
-OpenAlex は **API キー不要**で、Elsevier のキーのように契約機関の IP に縛られません
-(学外ネットワークでは Scopus が 401 になりますが、OpenAlex は使えます)。
-`OPENALEX_MAILTO` にメールアドレスを設定すると polite pool(10 req/s)に入りますが、
-無くても動きます。
-
-実測(ある実在の研究者 1 名について、DOI で突き合わせ):
-
-| | 件数 |
-|---|---:|
-| Scopus | 244 |
-| OpenAlex(機関で絞り込み後) | 241 |
-| 両方にある | 202 |
-| **OpenAlex にしか無い** | **37** |
-| Scopus にしか無い | 27 |
-
-OpenAlex 側にしか無い 37 件は、計測自動制御学会論文集・ISCIE のシンポジウム論文集など
-**国内学会系**とプレプリントが中心でした。
-
-#### 注意: OpenAlex は同姓同名を過剰にマージします
-
-Scopus の誤りが「分裂」(過小)なのに対し、OpenAlex は**逆向き**に間違えます。実測例:
-
-```
-author.id 単独                    441 件 / h=28   ← 1935 年の論文、機械工学、原子核物理を含む
-author.id + 所属機関の ROR         241 件          ← Scopus の 244 件と一致
-```
-
-所属履歴が 26 機関・57 年にまたがっており、複数人が 1 つの ID に同居しています。
-しかもこの混在プロフィールに ORCID が 1 個付いているので、ORCID でも分離できません。
-
-人事選考では**過大評価の方が危険**(過小なら本人が申告しますが、過大は誰も指摘しません)。
-そのため `openalex_author_works` は **機関 ROR か年範囲のどちらかを渡さないとエラー**に
-なります。著者検索の結果には `merge_risk`(low / medium / high)が付きます。
-
-```bash
-# 1. 候補を探す(merge risk が表示される)
-scopus-tools openalex --author "Taro Yamada" --ror 01abcd234
-
-# 2. 機関で絞って数え直す
-scopus-tools openalex --works-for A5000000001 --ror 01abcd234
-
-# 3. Scopus に無い論文かどうかを確認する
-scopus-tools openalex --doi 10.1000/example.2008.1
-```
-
-**OpenAlex と Scopus の合計値や h 指数を混ぜないでください。** 収録母集団が違うので
-意味を持ちません。突き合わせは DOI 単位で行ってください。
 
 ### 登録(インストール)
 
@@ -548,24 +493,6 @@ article-number / DOI / オープンアクセス / 所属機関 / キーワード
 
 主な用途は [分裂した Author ID をまとめる](#分裂した-author-id-をまとめる)ことです。
 タイトルの照合は緩く先頭数語や綴り違いでも当たるので、複数出たら誌名・年で確認してください。
-
-### `openalex` — OpenAlex 検索(API キー不要)
-
-```bash
-# 著者候補(過剰マージの疑いも表示)
-scopus-tools openalex --author "Taro Yamada" --ror 01abcd234
-
-# 業績一覧。--ror か --years のどちらかが必須
-scopus-tools openalex --works-for A5000000001 --ror 01abcd234 --limit 100
-scopus-tools openalex --works-for A5000000001 --years 2021-2025
-
-# 論文を引く(著者 OpenAlex ID 付き)
-scopus-tools openalex --doi 10.1000/example.2008.1
-scopus-tools openalex --title "Gompertz software reliability model"
-```
-
-`--format json`、`--output PATH` も使えます。詳細と注意点は
-[OpenAlex で Scopus の収録外を補う](#openalex-で-scopus-の収録外を補う)を参照。
 
 ### `batch` — CSV 入出力の一括サマリ
 

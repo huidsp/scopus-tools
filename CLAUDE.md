@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`scopus_tools` is a Python toolkit over the Elsevier Scopus REST API, the KAKEN (科研費) API
-and OpenAlex. It fetches researcher data, computes bibliometric indicators (H-index, G-index,
-citations, first-author counts), pulls KAKEN grant histories, and annotates papers with their
+`scopus_tools` is a Python toolkit over the Elsevier Scopus REST API and the KAKEN (科研費) API.
+It fetches researcher data, computes bibliometric indicators (H-index, G-index, citations,
+first-author counts), pulls KAKEN grant histories, and annotates papers with their
 Web of Science index coverage. It ships two frontends:
 
-- A CLI (`scopus-tools`) with 13 subcommands.
+- A CLI (`scopus-tools`) with 8 subcommands.
 - An MCP server (`scopus-tools mcp`, stdio) exposing data retrieval plus project persistence.
 
 **This package never calls an LLM over an API.** Evaluation, field inference, and
@@ -34,11 +34,9 @@ and CLI flag names stay in English.
   directory (upwards), then **`~/.scopus-tools/.env`**, then the package location (upwards,
   which only resolves for editable installs). The middle one is the canonical home — a
   `uv tool install` user has no repo clone, and it sits beside the cache DB and projects.
-  Three keys, only the first two required (`config.REQUIRED_KEYS`):
+  Only two keys:
   - `SCOPUS_API_KEY` — required for any Scopus-touching command.
   - `KAKEN_APP_ID` — required for KAKEN-touching commands.
-  - `OPENALEX_MAILTO` — optional; opts into OpenAlex's polite pool (10 req/s). OpenAlex
-    needs no key at all, so never report this as a missing key.
 - Local dev install:
 
   ```bash
@@ -78,9 +76,6 @@ CLI subcommands (see `scopus_tools/cli.py`):
 - `mcp-setup` — registers this tool with Claude Code (`claude mcp add`) or Claude Desktop.
   Touches no network. See the `mcp_setup` module note below.
 - `cache` — `stats` / `list` / `clear` / `vacuum` / `path`. Touches no network.
-- `openalex` — OpenAlex queries; no API key. `--author NAME [--ror ROR]`,
-  `--works-for ID --ror ROR|--years RANGE` (one of the two is required, see `openalex`),
-  `--doi`/`--title`. Complements Scopus, and works off campus where Scopus 401s.
 - `mcp` — runs the MCP server over stdio (see `mcp_server`); takes `--projects-dir`,
   `--scie-list CSV [CSV ...]`, and `--scie-dir DIR` (loads every `*.csv` in DIR). With neither
   scie flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir.
@@ -100,17 +95,16 @@ last 5 years** via `core.default_eval_year_range()` (e.g., in 2026 → `(2021, 2
 The codebase is intentionally flat — modules under `scopus_tools/`, each with a single responsibility.
 Two control flows:
 
-**CLI**: `cli.py` → `ScopusClient` / `KakenClient` / `OpenAlexClient` → `core` (pure
-functions) → `utils` (presentation).
-**MCP**: `mcp_server.py` → `ScopusClient` / `KakenClient` / `OpenAlexClient` / `ProjectStore`
-→ `core` / `scie` / `linking` → JSON dicts (no `utils` presentation layer).
+**CLI**: `cli.py` → `ScopusClient` / `KakenClient` → `core` (pure functions) → `utils` (presentation).
+**MCP**: `mcp_server.py` → `ScopusClient` / `KakenClient` / `ProjectStore` → `core` / `scie` /
+`linking` → JSON dicts (no `utils` presentation layer).
 
-All three clients send through **one** `httpcache.HttpLayer` each, minted from a shared
+Both clients send through **one** `httpcache.HttpLayer`, minted per-client from a shared
 `HttpContext` (one SQLite cache + one `requests.Session` per process).
 
 ### Modules
 
-- **`httpcache`** — the single outbound HTTP seam for **all three** clients. Timeout, connection
+- **`httpcache`** — the single outbound HTTP seam for **both** clients. Timeout, connection
   pooling, throttle, 429/5xx retry, and the SQLite response cache all live here.
   - **Never write secrets to disk.** `apiKey`/`appid` live in `HttpLayer(auth_params=...)` and
     are injected *after* the cache key and `params_json` are computed, so they cannot reach the
@@ -217,37 +211,6 @@ All three clients send through **one** `httpcache.HttpLayer` each, minted from a
     (valid values are 20/50/100/200/500 — smaller ones silently return nothing).
     Grant details come from `get_grants_by_researcher_id`, which is small (~19 KB for 19 grants).
 
-- **`openalex.OpenAlexClient`** — the only OpenAlex network boundary; the third data
-  source, added to complement Scopus. No API key. `OPENALEX_MAILTO` opts into the polite
-  pool (10 req/s) and is optional — hence `config.REQUIRED_KEYS` excludes it, so `config`
-  does not report a complete setup as incomplete.
-  - **Why it exists**, both measured: Elsevier keys are bound to the subscribing
-    institution's IP, so Scopus returns 401 off campus while OpenAlex works anywhere; and
-    OpenAlex indexes venues Scopus does not. Against a real 244-paper Scopus profile,
-    matching by DOI: **202 shared, 37 OpenAlex-only, 27 Scopus-only** — the OpenAlex-only
-    set is mostly Japanese society journals and proceedings (計測自動制御学会論文集,
-    ISCIE symposia) plus preprints.
-  - **OpenAlex errs the opposite way from Scopus: it over-merges authors.** Measured on
-    one real author profile: 441 works / h=28 spanning 26 institutions and 57
-    years, including a 1935 paper, fatigue-crack mechanical engineering and nuclear
-    physics. Filtering by institution ROR gives 241 — matching Scopus's 244. A single
-    ORCID is attached to that merged profile, so ORCID does not separate them either.
-    It **also** splits (three IDs for the same person at the same institution: 441/53/6).
-  - Over-merge is more dangerous than Scopus's split in a personnel review: understating
-    gets corrected by the person, overstating goes unchallenged. So `author_works()`
-    **raises `ValueError` unless `institution_ror` or `year_range` is given**, and
-    `parse_author` always attaches `merge_risk` (level from institution count and year
-    span). Keep both guards.
-  - `parse_work()` returns **the same dict shape as `api.parse_entry`** so `core`,
-    `scie` and `utils` work on either source unchanged; `source: "openalex"` distinguishes
-    them, and `tests/test_openalex.py` asserts the key sets stay compatible. Abstracts
-    come as a transposed index and are rebuilt only under `include_abstract`.
-  - Never merge the two sources' totals or h-indexes — different corpora. Compare
-    per-paper by DOI. The MCP tool says so in its response `note`.
-  - `mailto` is in `SECRET_PARAM_NAMES`: not a secret, but personal data, so it is
-    injected after the cache key is computed and never lands in the DB. It also keeps the
-    cache key stable whether or not a mailto is configured.
-
 - **`core`** — pure functions, no I/O.
   - `compute_indices(citations)` → `(h, g)`.
   - `summarize_papers(papers, year_range)` returns a dict consumed by `utils.print_report_text`
@@ -295,10 +258,9 @@ All three clients send through **one** `httpcache.HttpLayer` each, minted from a
   - `_migrate_if_legacy()` auto-converts old flat-format files (a single researcher per project)
     on load — don't remove this until you're sure no old files exist.
 
-- **`mcp_server`** — MCP (stdio) frontend, 18 tools (the list lives in `_TOOLS`):
+- **`mcp_server`** — MCP (stdio) frontend, 13 tools (the list lives in `_TOOLS`):
   - Data retrieval: `search_author`, `author_profile`, `author_summary`, `list_papers`,
-    `kaken_search_researcher`, `kaken_grants`, `link_kaken_researcher`,
-    `openalex_search_author`, `openalex_author_works`, `openalex_find_paper`.
+    `kaken_search_researcher`, `kaken_grants`, `link_kaken_researcher`.
   - Project persistence: `list_projects`, `read_project`, `create_project`, `delete_project`,
     `save_researcher_section`, `save_comparison` — thin wrappers over `projects.py`.
   - **No evaluation tool, by design** — the host model calls the retrieval tools iteratively

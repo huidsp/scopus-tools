@@ -27,12 +27,8 @@ from scopus_tools import cachedb, utils
 
 logger = logging.getLogger(__name__)
 
-# キャッシュキーにも params_json にも含めないパラメータ名。
-# mailto は秘密ではない(OpenAlex の polite pool 用の連絡先)が個人情報なので
-# 同じ扱いにする。キャッシュキーから外れることで、mailto の有無で同じ応答を
-# 二重に持たずに済むという利点もある。
-SECRET_PARAM_NAMES = ("apikey", "api_key", "appid", "app_id", "insttoken", "token",
-                      "mailto")
+# 既知の秘密パラメータ名。キャッシュキーにも params_json にも含めない。
+SECRET_PARAM_NAMES = ("apikey", "api_key", "appid", "app_id", "insttoken", "token")
 
 # 保存するレスポンスヘッダ(ホワイトリスト)。Set-Cookie 等は決して保存しない。
 HEADER_WHITELIST = (
@@ -48,10 +44,6 @@ API_LIMITS = {
     "scopus_author_retrieval": {"rps": 3, "weekly": 5000},
     "kaken_project":           {"rps": 1, "weekly": None},
     "kaken_researcher":        {"rps": 1, "weekly": None},
-    # OpenAlex は polite pool (mailto 付き) で 10 req/s・10 万件/日。週次クォータの
-    # 概念が無いので weekly は None。日次上限に当たることは実用上まず無い。
-    "openalex_work":           {"rps": 8, "weekly": None},
-    "openalex_author":         {"rps": 8, "weekly": None},
 }
 
 DEFAULT_TIMEOUT = (10, 60)   # (connect, read)
