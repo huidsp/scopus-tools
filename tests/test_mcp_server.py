@@ -382,6 +382,7 @@ class TestToolRegistry:
             "search_author", "find_papers", "author_profile", "author_summary",
             "list_papers", "kaken_search_researcher", "kaken_grants",
             "link_kaken_researcher",
+            "openalex_search_author", "openalex_author_works", "openalex_find_paper",
             "list_projects", "read_project", "create_project",
             "delete_project", "save_researcher_section", "save_comparison",
             "cache_stats",

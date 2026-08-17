@@ -6,7 +6,8 @@ import os
 import subprocess
 import sys
 from dotenv import find_dotenv, load_dotenv
-from scopus_tools import api, asof, cachedb, config, core, httpcache, mcp_setup, utils, kaken, scie
+from scopus_tools import (api, asof, cachedb, config, core, httpcache, kaken,
+                          mcp_setup, openalex, scie, utils)
 
 
 # どのサブコマンドにどの環境変数が必須か。
@@ -18,6 +19,7 @@ KEY_REQUIREMENTS = {
     "papers":        ["SCOPUS_API_KEY"],
     "batch":         ["SCOPUS_API_KEY"],
     "find":          ["SCOPUS_API_KEY"],
+    "openalex":      [],          # 認証不要。OPENALEX_MAILTO は任意
     "kaken-search":  ["KAKEN_APP_ID"],
     "kaken-summary": ["KAKEN_APP_ID"],
     "mcp":           [],
@@ -270,6 +272,25 @@ def main():
     find_p.add_argument("--output", default=None,
                         help="Write to file path instead of stdout")
 
+    # 4c. openalex (Scopus の収録範囲を補う。認証不要)
+    oa_p = subparsers.add_parser(
+        "openalex", help="Query OpenAlex (no API key needed; complements Scopus)")
+    oa_p.add_argument("--author", default=None,
+                      help="Search authors by name")
+    oa_p.add_argument("--works-for", dest="works_for", default=None,
+                      help="OpenAlex author ID (e.g. A5000000001) to list works for. "
+                           "Requires --ror and/or --years: an unfiltered author ID can "
+                           "include same-name researchers' publications")
+    oa_p.add_argument("--ror", default=None,
+                      help="Institution ROR to narrow by (e.g. 01abcd234)")
+    oa_p.add_argument("--years", default=None, help=YEAR_RANGE_HELP)
+    oa_p.add_argument("--doi", default=None, help="Look up one paper by DOI")
+    oa_p.add_argument("--title", default=None, help="Look up papers by title")
+    oa_p.add_argument("--limit", type=int, default=50, help="Max results (default: 50)")
+    oa_p.add_argument("--format", choices=["text", "json"], default="text",
+                      help="Output format (default: text)")
+    oa_p.add_argument("--output", default=None, help="Write to file path instead of stdout")
+
     # 5. kaken-search (科研費 KAKEN: 研究者検索)
     ks_p = subparsers.add_parser("kaken-search", help="Search KAKEN researcher by name or number")
     ks_p.add_argument("--name", help="Researcher full name (e.g., 'Victor Parque')")
@@ -476,11 +497,74 @@ def _config_command(args, parser):
         print(f"  {key} = {masked}")
     for key in info["missing"]:
         print(f"  {key} = (not set)")
+    for key in info.get("optional_missing") or []:
+        print(f"  {key} = (not set, optional)")
     if info["other_keys"]:
         print(f"  other keys kept as-is: {', '.join(info['other_keys'])}")
     if info["world_readable"]:
         print(f"\nWARNING: {info['path']} is readable by other users. "
               f"Run: chmod 600 {info['path']}")
+
+
+def _openalex_command(args, parser, http_ctx):
+    """openalex サブコマンド: 著者検索 / 業績一覧 / 論文引き。"""
+    client = openalex.OpenAlexClient(mailto=os.getenv("OPENALEX_MAILTO"),
+                                     context=http_ctx)
+    if args.author:
+        results = client.search_author(args.author, institution_ror=args.ror,
+                                       limit=args.limit)
+        if args.format == "json":
+            _emit_json({"query": args.author, "candidates": results}, args.output)
+            return
+        for a in results:
+            risk = a["merge_risk"]
+            flag = "" if risk["level"] == "low" else f"  [merge risk: {risk['level']}]"
+            print(f"{a['author_id']:14} {a['name'][:30]:32} works={a['works_count']:>5} "
+                  f"h={a['h_index']}{flag}")
+            print(f"{'':14} {a['affiliation'][:60]}")
+        if any(a["merge_risk"]["level"] != "low" for a in results):
+            sys.stdout.flush()      # stderr の注意書きが一覧より先に出ないように
+            print("\nNOTE: OpenAlex merges same-name authors. For a flagged profile the "
+                  "works/h above cover several people; re-count with:\n"
+                  "  scopus-tools openalex --works-for <ID> --ror <ROR>", file=sys.stderr)
+        return
+
+    if args.works_for:
+        years = _parse_year_range(args.years, parser) if args.years else None
+        try:
+            fetched = client.author_works(args.works_for, institution_ror=args.ror,
+                                          year_range=years, limit=args.limit)
+        except ValueError as e:
+            parser.error(f"openalex: {e}")
+        papers = fetched["papers"]
+        if not fetched["complete"]:
+            print(f"WARNING: {fetched['reason']}", file=sys.stderr)
+        if args.format == "json":
+            _emit_json({"author_id": args.works_for, "total_count": fetched["total_count"],
+                        "papers": papers}, args.output)
+            return
+        print(f"{fetched['total_count']} works matched, showing {len(papers)}")
+        for p in papers:
+            print(f"  {p['year']}  {(p['journal'] or '(no source)')[:34]:36} "
+                  f"{(p['title'] or '')[:44]}")
+        return
+
+    if args.doi or args.title:
+        try:
+            fetched = client.find_paper(doi=args.doi, title=args.title, limit=args.limit)
+        except ValueError as e:
+            parser.error(f"openalex: {e}")
+        if args.format == "json":
+            _emit_json(fetched, args.output)
+            return
+        for p in fetched["papers"]:
+            print(f"{p['year']}  {p['title']}")
+            print(f"   {p['journal']}  doi={p['doi']}")
+            for a in p["authors_detail"]:
+                print(f"     {a['name']} ({a['authid']})")
+        return
+
+    parser.error("openalex: give one of --author / --works-for / --doi / --title")
 
 
 def _mcp_setup_command(args, parser):
@@ -830,6 +914,9 @@ def _dispatch(args, parser, http_ctx):
         client = api.ScopusClient(context=http_ctx)
         year_range = _parse_year_range(args.years, parser, announce=args.years is None)
         utils.process_batch_summary(args.input, args.output, client, year_range=year_range)
+
+    elif args.command == "openalex":
+        _openalex_command(args, parser, http_ctx)
 
     elif args.command == "find":
         client = api.ScopusClient(context=http_ctx)

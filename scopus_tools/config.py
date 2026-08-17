@@ -17,7 +17,14 @@ from scopus_tools.cachedb import default_state_dir
 logger = logging.getLogger(__name__)
 
 # 設定できるキー。ここに無い名前は受け付けない(打ち間違いを黙って書かないため)。
-KNOWN_KEYS = ("SCOPUS_API_KEY", "KAKEN_APP_ID")
+# OPENALEX_MAILTO は鍵ではなく連絡先(polite pool 用)。認証には使わないが、
+# 置き場所を分けても管理が増えるだけなので同じ .env に置く。
+KNOWN_KEYS = ("SCOPUS_API_KEY", "KAKEN_APP_ID", "OPENALEX_MAILTO")
+
+# 未設定を「不足」として報告するキー。OpenAlex は無くても動く(共用プールに
+# なって遅くなるだけ)ので、ここには入れない — 任意のものを不足として並べると、
+# 設定が完了していても未完了に見える。
+REQUIRED_KEYS = ("SCOPUS_API_KEY", "KAKEN_APP_ID")
 
 
 def user_env_path():
@@ -143,6 +150,8 @@ def describe(path=None):
         "mode": mode,
         "world_readable": world_readable,
         "keys": {k: mask(values.get(k)) for k in KNOWN_KEYS if values.get(k)},
-        "missing": [k for k in KNOWN_KEYS if not values.get(k)],
+        "missing": [k for k in REQUIRED_KEYS if not values.get(k)],
+        "optional_missing": [k for k in KNOWN_KEYS
+                             if k not in REQUIRED_KEYS and not values.get(k)],
         "other_keys": sorted(k for k in values if k not in KNOWN_KEYS),
     }

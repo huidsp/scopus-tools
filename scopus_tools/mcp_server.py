@@ -22,7 +22,8 @@ import sys
 
 import requests
 
-from scopus_tools import api, asof, core, httpcache, kaken, linking, projects, scie
+from scopus_tools import (api, asof, core, httpcache, kaken, linking, openalex,
+                          projects, scie)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ _STALE_POLICY = None
 # クライアント類は初回ツール呼び出し時に遅延生成する(鍵が無くても起動はできる)
 _scopus_client = None
 _kaken_client = None
+_openalex_client = None
 _project_store = None
 
 # 1 回のツール応答で返す論文数の既定上限(トークン爆発の防止)
@@ -117,6 +119,15 @@ def _get_kaken():
     if _kaken_client is None:
         _kaken_client = kaken.KakenClient(context=_get_context())
     return _kaken_client
+
+
+def _get_openalex():
+    """OpenAlex は鍵不要。mailto は polite pool 用で、無くても動く。"""
+    global _openalex_client
+    if _openalex_client is None:
+        _openalex_client = openalex.OpenAlexClient(
+            mailto=os.getenv("OPENALEX_MAILTO"), context=_get_context())
+    return _openalex_client
 
 
 @contextlib.contextmanager
@@ -587,6 +598,118 @@ def cache_stats():
     return stats
 
 
+@_network_guard
+def openalex_search_author(name, institution_ror=None, limit=10, refresh=False):
+    """OpenAlex で著者候補を検索する(認証不要。Scopus が使えない環境でも動く)。
+
+    **返る works_count / h_index / cited_by_count は絞り込み前の値で、信用しては
+    いけない。** OpenAlex は同姓同名を強くマージするため、1 つの著者 ID に複数人が
+    同居していることがある(実測: ある ID は 441 件・h=28 だったが、1935 年の論文や
+    別分野・別機関の業績を含み、機関で絞ると 241 件だった)。
+
+    各候補の `merge_risk` に所属機関数・在籍年の広がり・判定(low/medium/high)が
+    入っている。medium 以上なら、`affiliations` から対象研究者の機関 ROR を選び、
+    `openalex_author_works(author_id, institution_ror=...)` で数え直すこと。
+
+    `institution_ror` を渡すと在籍機関で候補を絞れる(例: 広島大学は
+    "https://ror.org/01abcd234")。**OpenAlex は分裂もする** — 同じ機関の同一人物が
+    複数の ID に分かれていることがあるので(実測で 441/53/6 件の 3 ID)、候補は
+    1 つに決めつけず、必要なら複数 ID それぞれで業績を取って DOI で重複を除くこと。
+    """
+    client = _get_openalex()
+    with _fetching(client, refresh) as records:
+        results = client.search_author(name, institution_ror=institution_ror, limit=limit)
+    payload = {"query": name, "institution_ror": institution_ror,
+               "count": len(results), "candidates": results}
+    if any((c.get("merge_risk") or {}).get("level") in ("medium", "high") for c in results):
+        payload["warning"] = (
+            "At least one candidate looks like several same-name researchers merged into "
+            "one profile. Do not report its works_count or h_index as this person's "
+            "record — narrow it with openalex_author_works first.")
+    return _with_as_of(payload, records, "openalex_author")
+
+
+@_network_guard
+def openalex_author_works(author_id, institution_ror=None, year_range=None,
+                          limit=DEFAULT_PAPER_LIMIT, scie_only=False, refresh=False):
+    """OpenAlex の著者 ID から業績を取得する。**絞り込み条件が必須。**
+
+    `institution_ror` と `year_range` の少なくとも一方を必ず渡すこと。渡さないと
+    エラーになる — 裸の著者 ID は他人の業績を含みうるので、人事選考で使う数字を
+    そこから作らせないため。ROR は `openalex_search_author` の `affiliations` にある。
+
+    Scopus の `list_papers` と同じ形の論文 dict を返すので、両者を DOI で突き合わせ
+    られる。**OpenAlex は Scopus 収録外(国内の研究会報告など)を拾える**一方、
+    Scopus 側の被引用数とは母集団が違うので、h 指数などを混ぜて計算しないこと。
+    """
+    client = _get_openalex()
+    years = _resolve_years(year_range) if year_range else None
+    try:
+        with _fetching(client, refresh) as records:
+            fetched = client.author_works(
+                author_id, institution_ror=institution_ror, year_range=years,
+                limit=limit)
+    except ValueError as e:
+        return _error(str(e))
+
+    papers = fetched["papers"]
+    if _INDEX_SETS:
+        scie.annotate_papers_indexes(papers, _INDEX_SETS)
+        if scie_only:
+            papers = [p for p in papers if p.get("wos_indexes")]
+
+    payload = {
+        "author_id": openalex.normalize_author_id(author_id),
+        "filters": {"institution_ror": institution_ror, "year_range": years},
+        "total_count": fetched["total_count"],
+        "returned_count": len(papers),
+        "truncated": bool(limit and (fetched["total_count"] or 0) > limit),
+        "papers": papers,
+        "source": "openalex",
+        "note": ("OpenAlex counts are not interchangeable with Scopus counts — the "
+                 "indexed corpus differs. Compare per-paper by DOI, not by totals."),
+    }
+    if not fetched["complete"]:
+        payload["incomplete"] = True
+        payload["incomplete_reason"] = fetched["reason"]
+        payload["incomplete_note"] = (
+            f"WARNING: the fetch did not complete ({fetched['reason']}). "
+            f"Do not present these counts as a full publication record.")
+    return _with_as_of(payload, records, "openalex_work")
+
+
+@_network_guard
+def openalex_find_paper(doi=None, title=None, limit=10, include_abstract=False,
+                        refresh=False):
+    """DOI またはタイトルから論文を引く(著者 ID・所属付き、認証不要)。
+
+    Scopus の `find_papers` と同じ用途に加えて、**Scopus に無い論文を確認する**のに
+    使える。ある論文が Scopus の検索に出てこないとき、ここで引ければ「Scopus 未収録」
+    であって「存在しない」のではないと分かる。DOI 指定なら完全一致。
+    """
+    client = _get_openalex()
+    try:
+        with _fetching(client, refresh) as records:
+            fetched = client.find_paper(doi=doi, title=title, limit=limit,
+                                        include_abstract=include_abstract)
+    except ValueError as e:
+        return _error(str(e))
+
+    payload = {
+        "query": {"doi": doi, "title": title},
+        "total_count": fetched["total_count"],
+        "returned_count": len(fetched["papers"]),
+        "papers": fetched["papers"],
+        "source": "openalex",
+    }
+    if not fetched["papers"] and fetched["complete"]:
+        payload["hint"] = "No match in OpenAlex. Try the DOI, or fewer title words."
+    if not fetched["complete"]:
+        payload["incomplete"] = True
+        payload["incomplete_reason"] = fetched["reason"]
+    return _with_as_of(payload, records, "openalex_work")
+
+
 _TOOLS = [
     # データ取得
     search_author,
@@ -597,6 +720,10 @@ _TOOLS = [
     kaken_search_researcher,
     kaken_grants,
     link_kaken_researcher,
+    # OpenAlex(Scopus の収録範囲を補う。認証不要)
+    openalex_search_author,
+    openalex_author_works,
+    openalex_find_paper,
     # プロジェクト永続化
     list_projects,
     read_project,
