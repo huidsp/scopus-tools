@@ -203,7 +203,11 @@ class HttpLayer:
         self.offline = offline
         # enabled=None なら環境変数で判断
         self.enabled = (not cachedb.cache_disabled()) if enabled is None else bool(enabled)
-        self._last_request_at = {}     # api -> monotonic
+        # ページ並列取得(api.search_papers_detailed)のワーカースレッドと共有する。
+        # 「次に送ってよい時刻」をロック内で予約する方式なので、複数スレッドが
+        # 同じ last を読んで一斉送信することはない。
+        self._next_send_at = {}        # api -> monotonic
+        self._throttle_lock = threading.Lock()
         self._collectors = threading.local()
         # ここから先は auth_params(= API キー)を載せたリクエストを送る。
         # urllib3 等は DEBUG で完全な URL を出すので、CLI を経由しない
@@ -230,6 +234,21 @@ class HttpLayer:
         finally:
             stack.pop()
 
+    def snapshot_collectors(self):
+        """現在のスレッドの collector スタックを返す(ワーカースレッドへの引き継ぎ用)。
+
+        `collect()` のスタックは threading.local なので、ページ並列取得の
+        ワーカースレッドから送ったリクエストはそのままでは親スレッドの
+        collect() に載らない。親でこれを取り、ワーカー側で
+        `adopt_collectors()` すると同じ records リストに追記される
+        (list.append は GIL 下でスレッドセーフ)。
+        """
+        return list(getattr(self._collectors, "stack", None) or [])
+
+    def adopt_collectors(self, stack):
+        """`snapshot_collectors()` の結果を現在のスレッドに取り込む。"""
+        self._collectors.stack = list(stack)
+
     def _record_fetch(self, api, fetched_at, cached):
         stack = getattr(self._collectors, "stack", None)
         if not stack:
@@ -245,13 +264,13 @@ class HttpLayer:
         if not rps:
             return
         min_interval = (1.0 / rps) * 1.2      # 1.2 は安全係数
-        last = self._last_request_at.get(api)
         now = time.monotonic()
-        if last is not None:
-            wait = min_interval - (now - last)
-            if wait > 0:
-                time.sleep(wait)
-        self._last_request_at[api] = time.monotonic()
+        with self._throttle_lock:
+            slot = max(now, self._next_send_at.get(api, now))
+            self._next_send_at[api] = slot + min_interval
+        wait = slot - now
+        if wait > 0:
+            time.sleep(wait)
 
     # ---- クォータ状態 -------------------------------------------------
 

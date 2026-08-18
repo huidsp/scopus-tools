@@ -210,9 +210,14 @@ Both are injected after the cache key is computed, so neither reaches the DB.
   - `search_papers` paginates with `view=COMPLETE`, dedupes by `eid`, takes `max(citations)`
     on duplicates, and ORs `is_first_author` flags (computed by matching the entry's first
     `authid` against the queried `author_ids` set).
-  - `search_papers` paginates with `view=COMPLETE`, dedupes by `eid`, takes `max(citations)`
-    on duplicates, and ORs `is_first_author` flags (computed by matching the entry's first
-    `authid` against the queried `author_ids` set).
+  - **Pagination is parallel** (`PAGE_FETCH_WORKERS` = 4): page 1 is fetched synchronously
+    to learn the total, the rest concurrently. Measured on a 244-paper author: 11.3s → 6.7s.
+    The rps limit is enforced by `HttpLayer._throttle`'s lock-protected slot reservation,
+    shared across threads; workers adopt the parent's collect() stack via
+    `snapshot_collectors()`/`adopt_collectors()` so as-of dates still record. A bad page
+    cancels not-yet-started futures (the sequential code stopped at the first failure;
+    a few in-flight extra requests are accepted). Don't raise the page size instead —
+    `view=COMPLETE` caps `count` at 25, and STANDARD loses the author list.
 
 - **`kaken.KakenClient`** — the only KAKEN network boundary. Wraps NRID (researcher) and KAKEN
   (project) OpenSearch endpoints. NRID returns JSON, KAKEN returns XML — both parsed into

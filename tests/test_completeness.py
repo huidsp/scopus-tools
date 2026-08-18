@@ -35,6 +35,20 @@ def _page(entries, total):
     })
 
 
+def _by_start(mapping, default=None):
+    """start パラメータをキーに応答を返す side_effect。
+
+    ページ取得は並列化されており requests.get の呼び出し順が不定なので、
+    側効果リスト(逐次順序前提)ではなくこれを使う。
+    """
+    def _side_effect(url, params=None, **kwargs):
+        resp = mapping.get(params["start"], default)
+        if resp is None:
+            raise AssertionError(f"unexpected request for start={params['start']}")
+        return resp
+    return _side_effect
+
+
 def _entries(start, count):
     return [{"eid": f"e{start + i}", "dc:title": f"P{start + i}",
              "prism:coverDate": "2023-01-01", "citedby-count": "1",
@@ -53,8 +67,9 @@ class TestComplete:
         assert res.expected_total == 3
 
     def test_all_pages_ok_is_complete(self):
-        pages = [_page(_entries(0, 25), 60), _page(_entries(25, 25), 60),
-                 _page(_entries(50, 10), 60)]
+        pages = _by_start({0: _page(_entries(0, 25), 60),
+                           25: _page(_entries(25, 25), 60),
+                           50: _page(_entries(50, 10), 60)})
         with patch("requests.get", side_effect=pages):
             res = _client().search_papers_detailed(["111"])
         assert res.complete is True
@@ -71,14 +86,15 @@ class TestComplete:
 
 class TestIncomplete:
     def test_mid_pagination_failure_is_flagged(self):
-        """3 ページ中 2 ページ目が 500 → 部分結果を返しつつ complete=False。"""
-        pages = [_page(_entries(0, 25), 75), make_response(status_code=500)]
+        """2 ページ目が 500 → 部分結果を返しつつ complete=False。"""
+        pages = _by_start({0: _page(_entries(0, 25), 50),
+                           25: make_response(status_code=500)})
         with patch("requests.get", side_effect=pages):
             res = _client().search_papers_detailed(["111"])
         assert res.complete is False
         assert "500" in res.reason
         assert res.actual_total == 25       # 部分結果は今までどおり返す
-        assert res.expected_total == 75
+        assert res.expected_total == 50
 
     def test_first_page_failure_is_flagged(self):
         with patch("requests.get", return_value=make_response(status_code=503)):
@@ -97,22 +113,23 @@ class TestIncomplete:
         assert get_mock.call_count == SCOPUS_PAGINATION_LIMIT // 25
 
     def test_short_result_versus_total_is_flagged(self):
-        """総数 100 と言われたのに 25 件しか集まらなければ不完全。"""
-        # 2 ページ目が空 = データ終端。ここで打ち切り、不足を報告する。
-        pages = [_page(_entries(0, 25), 100), _page([], 100)]
+        """総数 50 と言われたのに 25 件しか集まらなければ不完全。"""
+        # 2 ページ目が空 = データ終端。不足を報告する。
+        pages = _by_start({0: _page(_entries(0, 25), 50), 25: _page([], 50)})
         with patch("requests.get", side_effect=pages) as get_mock:
             res = _client().search_papers_detailed(["111"])
         assert res.complete is False
-        assert "100" in res.reason
-        # 空ページ以降は投げない(クォータを浪費しない)
+        assert "50" in res.reason
         assert get_mock.call_count == 2
 
     def test_small_shortfall_is_tolerated(self):
         """ページ間の重複排除で少し減るのは許容範囲(誤警告を出さない)。"""
         total = 100
         keep = int(total * PAGINATION_TOLERANCE)     # 98
-        pages = [_page(_entries(0, 25), total), _page(_entries(25, 25), total),
-                 _page(_entries(50, 25), total), _page(_entries(75, keep - 75), total)]
+        pages = _by_start({0: _page(_entries(0, 25), total),
+                           25: _page(_entries(25, 25), total),
+                           50: _page(_entries(50, 25), total),
+                           75: _page(_entries(75, keep - 75), total)})
         with patch("requests.get", side_effect=pages):
             res = _client().search_papers_detailed(["111"])
         assert res.complete is True
@@ -135,12 +152,14 @@ class TestSelfHealing:
         client = ScopusClient(api_key="k",
                               http=HttpLayer(db=db, auth_params={"apiKey": "k"},
                                              max_retries=0, enabled=True))
-        # 100 件 = 4 ページ。2 ページ目で失敗 → そこで打ち切る
-        pages = [_page(_entries(0, 25), 100), make_response(status_code=500)]
+        # 100 件 = 4 ページ。2 ページ目以降が失敗。並列取得なのでインフライトの
+        # 数ページは投げてしまうが、失敗ページはキャッシュされない。
+        pages = _by_start({0: _page(_entries(0, 25), 100)},
+                          default=make_response(status_code=500))
         with patch("requests.get", side_effect=pages) as m:
             res = client.search_papers_detailed(["111"])
         assert res.complete is False
-        assert m.call_count == 2          # 3・4 ページ目は投げない
+        assert 2 <= m.call_count <= 4
         assert db.stats()["entries"] == 1  # 成功した 1 ページだけキャッシュ
 
     def test_rerun_fetches_only_the_missing_pages(self, tmp_path):
@@ -153,12 +172,14 @@ class TestSelfHealing:
                                                max_retries=0, enabled=True))
 
         with patch("requests.get",
-                   side_effect=[_page(_entries(0, 25), 100), make_response(status_code=500)]):
+                   side_effect=_by_start({0: _page(_entries(0, 25), 100)},
+                                         default=make_response(status_code=500))):
             _client().search_papers_detailed(["111"])
 
         # 再実行: 1 ページ目はキャッシュから出るので 3 回しか送らない
-        rest = [_page(_entries(25, 25), 100), _page(_entries(50, 25), 100),
-                _page(_entries(75, 25), 100)]
+        rest = _by_start({25: _page(_entries(25, 25), 100),
+                          50: _page(_entries(50, 25), 100),
+                          75: _page(_entries(75, 25), 100)})
         with patch("requests.get", side_effect=rest) as m:
             res = _client().search_papers_detailed(["111"])
         assert m.call_count == 3
@@ -180,14 +201,16 @@ class TestBackwardCompatibility:
 
     def test_search_papers_returns_partials_on_failure_as_before(self):
         """既存の呼び出し側を壊さない: 例外ではなく部分結果を返す。"""
-        pages = [_page(_entries(0, 25), 75), make_response(status_code=500)]
+        pages = _by_start({0: _page(_entries(0, 25), 50),
+                           25: make_response(status_code=500)})
         with patch("requests.get", side_effect=pages):
             papers = _client().search_papers(["111"])
         assert len(papers) == 25
 
     def test_incomplete_is_logged_as_error(self, caplog):
         import logging
-        pages = [_page(_entries(0, 25), 75), make_response(status_code=500)]
+        pages = _by_start({0: _page(_entries(0, 25), 50),
+                           25: make_response(status_code=500)})
         with caplog.at_level(logging.ERROR), patch("requests.get", side_effect=pages):
             _client().search_papers_detailed(["111"])
         assert any("INCOMPLETE" in r.message or "incomplete" in r.message

@@ -253,6 +253,47 @@ class TestThrottle:
         assert slept.called
         assert slept.call_args[0][0] > 0
 
+    def test_concurrent_requests_reserve_distinct_slots(self, cache_db):
+        """並列ページ取得でも rps を守る: 予約制なので送信時刻が重ならない。
+
+        2 スレッドが同時に _throttle を通っても、片方は min_interval ぶん
+        待たされる(同じ last を読んで一斉送信、が起きない)。
+        """
+        import threading
+        layer = HttpLayer(db=cache_db, auth_params={"apiKey": SECRET}, enabled=False)
+        waits = []
+        with patch("requests.get", return_value=make_response({"n": 1})), \
+             patch("time.sleep", side_effect=lambda w: waits.append(w)):
+            threads = [threading.Thread(
+                target=lambda q: layer.get(URL, {"query": q}, api="scopus_author_search"),
+                args=(str(i),)) for i in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        # 3 リクエスト中 2 つは待たされ、待ち時間は互いに異なる(スロットが直列)
+        assert len(waits) >= 2
+        assert len(set(round(w, 3) for w in waits)) == len(waits)
+
+    def test_worker_thread_fetches_land_in_parent_collect(self, cache_db):
+        """snapshot/adopt_collectors でワーカーの取得が親の collect() に載る。"""
+        import threading
+        layer = HttpLayer(db=cache_db, auth_params={"apiKey": SECRET}, enabled=False)
+        with patch("requests.get", return_value=make_response({"n": 1})), \
+             patch("time.sleep"):
+            with layer.collect() as records:
+                snapshot = layer.snapshot_collectors()
+
+                def work():
+                    layer.adopt_collectors(snapshot)
+                    layer.get(URL, {"query": "w"}, api="scopus_search")
+
+                t = threading.Thread(target=work)
+                t.start()
+                t.join()
+        assert len(records) == 1
+        assert records[0]["api"] == "scopus_search"
+
     def test_cache_hits_do_not_throttle(self, layer):
         with patch("requests.get", return_value=make_response({"n": 1})):
             layer.get(URL, {"query": "a"}, api="scopus_author_search")

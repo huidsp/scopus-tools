@@ -1,5 +1,6 @@
 import os
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scopus_tools import scie
 from scopus_tools.httpcache import HttpLayer
@@ -12,6 +13,11 @@ SCOPUS_PAGINATION_LIMIT = 5000
 
 # 取得件数 / 総件数の許容比。ページ間の重複排除と件数変動を吸収する。
 PAGINATION_TOLERANCE = 0.98
+
+# ページ並列取得のワーカー数。scopus_search の rps は 9 で、スロットル
+# (安全係数込み ~7.5 req/s)は HttpLayer 側で全スレッド共有の予約制なので、
+# ここは往復レイテンシを隠すだけの並列度でよい。
+PAGE_FETCH_WORKERS = 4
 
 # find_papers が API に投げる件数。limit と切り離して固定にしてある:
 # キャッシュキーは全パラメータを含むので、count を可変にすると limit を変えるたびに
@@ -393,68 +399,105 @@ class ScopusClient:
             query = f"({query}) AND {query_extra}"
         logger.info("Searching papers for author_ids=%s", author_ids)
 
-        start = 0
-        total = 1
-        expected_total = None
-        request_count = 0
-        complete = True
-        reason = None
-        while start < total:
-            if start >= SCOPUS_PAGINATION_LIMIT:
-                # Scopus は start > 5000 を拒否する。ここで止めないと 400 を踏んで
-                # 「完全な結果」に見える切り詰めリストを返してしまう。
-                complete = False
-                reason = (f"Scopus paginates only up to {SCOPUS_PAGINATION_LIMIT} records; "
-                          f"{total} matched. Narrow the query (e.g. by year).")
-                logger.error("search_papers incomplete: %s", reason)
-                break
-            url = f"{self.base_url}/search/scopus"
+        url = f"{self.base_url}/search/scopus"
+
+        def fetch_page(start):
             params = {
                 "query": query,
                 "start": start, "count": page_size, "view": "COMPLETE"
             }
             logger.debug("Requesting page: start=%d, count=%d", start, page_size)
-            response = self._http.get(url, params=params,
-                                      headers={"Accept": "application/json"},
-                                      api="scopus_search")
-            request_count += 1
-            if response.status_code != 200:
-                complete = False
-                reason = f"HTTP {response.status_code} at start={start}"
-                logger.error("search_papers incomplete: %s", reason)
-                break
+            return self._http.get(url, params=params,
+                                  headers={"Accept": "application/json"},
+                                  api="scopus_search")
 
-            data = response.json().get("search-results", {})
-            try:
-                total = int(data.get("opensearch:totalResults", 0))
-            except (TypeError, ValueError):
-                complete = False
-                reason = "totalResults missing or not an integer"
-                logger.error("search_papers incomplete: %s", reason)
-                break
-            if expected_total is None:
-                expected_total = total
-            entries = data.get("entry", [])
-            total_pages = (total + page_size - 1) // page_size if total > 0 else 0
-            current_page = (start // page_size) + 1 if total_pages > 0 else 0
-            fetched_records = min(start + len(entries), total) if total > 0 else 0
-            progress(
-                f"  Scopus fetch: page {current_page}/{total_pages} "
-                f"({fetched_records}/{total} entries)"
-            )
-            logger.debug("Retrieved %d entries (total=%d)", len(entries), total)
+        complete = True
+        reason = None
+        failed_starts = {}    # start -> reason(最小の start を採用する)
 
-            if not entries:
-                # 空ページはデータ終端の合図。ここで止めないと start が total に
-                # 達するまで空リクエストを投げ続けてクォータを浪費する。
-                if start < total:
-                    complete = False
-                    reason = (f"Scopus returned an empty page at start={start} "
-                              f"but reported {total} total")
-                    logger.error("search_papers incomplete: %s", reason)
-                break
+        # 1 ページ目は同期で取り、総数を知る。
+        request_count = 1
+        response = fetch_page(0)
+        if response.status_code != 200:
+            reason = f"HTTP {response.status_code} at start=0"
+            logger.error("search_papers incomplete: %s", reason)
+            progress_done()
+            return FetchResult(papers=[], complete=False, reason=reason,
+                               request_count=1, expected_total=None, actual_total=0)
+        data = response.json().get("search-results", {})
+        try:
+            total = int(data.get("opensearch:totalResults", 0))
+        except (TypeError, ValueError):
+            reason = "totalResults missing or not an integer"
+            logger.error("search_papers incomplete: %s", reason)
+            progress_done()
+            return FetchResult(papers=[], complete=False, reason=reason,
+                               request_count=1, expected_total=None, actual_total=0)
+        expected_total = total
+        pages = {}            # start -> entries(マージは start 順に行う)
+        first_entries = data.get("entry", [])
+        if first_entries:
+            pages[0] = first_entries
+        elif total > 0:
+            failed_starts[0] = ("Scopus returned an empty page at start=0 "
+                                f"but reported {total} total")
 
-            for e in entries:
+        if total > SCOPUS_PAGINATION_LIMIT:
+            # Scopus は start > 5000 を拒否する。上限までで打ち切り、不完全と報告する。
+            complete = False
+            reason = (f"Scopus paginates only up to {SCOPUS_PAGINATION_LIMIT} records; "
+                      f"{total} matched. Narrow the query (e.g. by year).")
+            logger.error("search_papers incomplete: %s", reason)
+
+        # 残りページは並列で取る。スロットル(HttpLayer 側で全スレッド共有の予約制)が
+        # rps を守るので、ここは往復レイテンシを隠すだけの並列度でよい。
+        starts = list(range(page_size, min(total, SCOPUS_PAGINATION_LIMIT), page_size))
+        if starts and not failed_starts:
+            snapshot = self._http.snapshot_collectors()
+            total_pages = 1 + len(starts)
+
+            def worker(start):
+                # collect()(as-of 記録)のスタックは threading.local なので、
+                # 親スレッドのものを引き継がないと取得日時が記録されない。
+                self._http.adopt_collectors(snapshot)
+                return start, fetch_page(start)
+
+            done_pages = 1
+            with ThreadPoolExecutor(
+                    max_workers=min(PAGE_FETCH_WORKERS, len(starts))) as executor:
+                futures = [executor.submit(worker, s) for s in starts]
+                for fut in as_completed(futures):
+                    if fut.cancelled():
+                        continue
+                    start, resp = fut.result()
+                    request_count += 1
+                    done_pages += 1
+                    progress(f"  Scopus fetch: {done_pages}/{total_pages} pages "
+                             f"({total} entries total)")
+                    if resp.status_code != 200:
+                        failed_starts[start] = f"HTTP {resp.status_code} at start={start}"
+                    else:
+                        entries = resp.json().get("search-results", {}).get("entry", [])
+                        if entries:
+                            pages[start] = entries
+                        elif start < total:
+                            # 空ページはデータ終端の合図。逐次実装は以降を投げなかった。
+                            # 並列でも未開始のページを取り消してクォータ浪費を抑える。
+                            failed_starts[start] = (
+                                f"Scopus returned an empty page at start={start} "
+                                f"but reported {total} total")
+                    if start in failed_starts:
+                        for f in futures:
+                            f.cancel()
+
+        if failed_starts:
+            complete = False
+            if reason is None:
+                reason = failed_starts[min(failed_starts)]
+            logger.error("search_papers incomplete: %s", reason)
+
+        for start in sorted(pages):
+            for e in pages[start]:
                 eid = e.get("eid")
                 if not eid:
                     continue
@@ -476,7 +519,6 @@ class ScopusClient:
                         papers_dict[eid]["author_count"] = new_entry["author_count"]
                 else:
                     papers_dict[eid] = new_entry
-            start += page_size
 
         progress_done()
         papers = list(papers_dict.values())
