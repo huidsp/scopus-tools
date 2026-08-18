@@ -166,7 +166,14 @@ class TestScopusTools:
         assert result["total_count"] == 10
         assert result["returned_count"] == 4
         assert result["truncated"] is True
+        assert result["truncated_by"] == "limit"
         assert len(result["papers"]) == 4
+
+    def test_untruncated_has_no_truncated_by(self, scopus_env):
+        client = MagicMock()
+        client.search_papers_detailed.return_value = _fetched(_papers(3))
+        mcp_server._scopus_client = client
+        assert "truncated_by" not in mcp_server.list_papers("123")
 
     def test_list_papers_annotates_indexes(self, scopus_env):
         client = MagicMock()

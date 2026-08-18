@@ -410,6 +410,7 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
 
     **year_range を省略すると全期間ではなく既定の直近 5 年(前年まで、例: 2026 年なら
     2021-2025)になる。** 全期間が欲しければ "1900-2100" のように明示すること。
+    書式は "2021-2025" / "2021,2025" / "2021:2025" / "[2021,2025]" のいずれも可。
 
     fields="title,year,citations,author_position" のようにカンマ区切りで指定すると、
     各論文をそのキーだけに射影して返す(集計用途でペイロードが大幅に軽くなる)。
@@ -477,6 +478,9 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
         "truncated": truncated,
         "papers": out_papers,
     }
+    if truncated:
+        # `incomplete`(取りこぼし)と混同されないよう、意図した打ち切りだと明示する
+        payload["truncated_by"] = "limit"
     if metrics_fetch:
         payload["metrics_fetch"] = metrics_fetch
     _attach_completeness(payload, fetched)
