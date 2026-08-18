@@ -358,6 +358,8 @@ def author_profile(author_id, refresh=False):
 def author_summary(author_ids, year_range=None, include_metrics=False, refresh=False):
     """著者の書誌指標(H/G-index、被引用、筆頭著者数、WoS 収録数)をまとめる。
 
+    year_range を省略すると全期間ではなく既定の直近 5 年(前年まで)になる。
+
     応答の `as_of` / `as_of_note` に「いつ時点のデータか」が入る。被引用数は
     時間とともに増えるので、複数の研究者を比較するときは取得日をそろえること
     (古い方を refresh=True で取り直す)。
@@ -402,8 +404,19 @@ def author_summary(author_ids, year_range=None, include_metrics=False, refresh=F
 
 @_network_guard
 def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_only=False,
-                include_author_ids=False, include_metrics=False, refresh=False):
+                include_author_ids=False, include_metrics=False, fields=None,
+                sort="year", refresh=False):
     """指定期間に出版された論文を、著者順位と WoS 収録インデックス付きで列挙する。
+
+    **year_range を省略すると全期間ではなく既定の直近 5 年(前年まで、例: 2026 年なら
+    2021-2025)になる。** 全期間が欲しければ "1900-2100" のように明示すること。
+
+    fields="title,year,citations,author_position" のようにカンマ区切りで指定すると、
+    各論文をそのキーだけに射影して返す(集計用途でペイロードが大幅に軽くなる)。
+    未知のキー名はエラーにせず単に落ちるので、綴りに注意。
+
+    sort="citations" で被引用数の降順に並ぶ(既定は "year": 出版年降順)。
+    上位 N 件だけ欲しいときは sort="citations" と limit=N を組み合わせる。
 
     応答の `as_of` / `as_of_note` に「いつ時点のデータか」が入る。
     refresh=True でキャッシュを無視して取り直す。
@@ -442,17 +455,27 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
     if scie_only:
         papers = [p for p in papers if p.get("wos_indexes")]
 
-    papers.sort(key=lambda p: (-(p.get("year") or 0), -(p.get("citations") or 0)))
+    if sort == "citations":
+        papers.sort(key=lambda p: (-(p.get("citations") or 0), -(p.get("year") or 0)))
+    elif sort in (None, "", "year"):
+        papers.sort(key=lambda p: (-(p.get("year") or 0), -(p.get("citations") or 0)))
+    else:
+        return _error(f"unknown sort: {sort!r} (use 'year' or 'citations')")
     total = len(papers)
     limit = max(1, int(limit or DEFAULT_PAPER_LIMIT))
     truncated = total > limit
+    out_papers = papers[:limit]
+    if fields:
+        wanted = [f.strip() for f in str(fields).split(",") if f.strip()]
+        if wanted:
+            out_papers = [{k: p[k] for k in wanted if k in p} for p in out_papers]
     payload = {
         "scopus_ids": ids,
         "year_range": [start_y, end_y],
         "total_count": total,
         "returned_count": min(total, limit),
         "truncated": truncated,
-        "papers": papers[:limit],
+        "papers": out_papers,
     }
     if metrics_fetch:
         payload["metrics_fetch"] = metrics_fetch

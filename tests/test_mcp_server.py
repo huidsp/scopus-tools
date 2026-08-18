@@ -176,6 +176,24 @@ class TestScopusTools:
         result = mcp_server.list_papers("123")
         assert all(p["wos_indexes"] == ["SCIE"] for p in result["papers"])
 
+    def test_list_papers_fields_projection(self, scopus_env):
+        client = MagicMock()
+        client.search_papers_detailed.return_value = _fetched(_papers(3))
+        mcp_server._scopus_client = client
+        result = mcp_server.list_papers("123", fields="title, year,citations,nope")
+        for p in result["papers"]:
+            assert set(p.keys()) == {"title", "year", "citations"}
+
+    def test_list_papers_sort_citations(self, scopus_env):
+        client = MagicMock()
+        client.search_papers_detailed.return_value = _fetched(_papers(5))
+        mcp_server._scopus_client = client
+        result = mcp_server.list_papers("123", sort="citations", limit=3)
+        cites = [p["citations"] for p in result["papers"]]
+        assert cites == sorted(cites, reverse=True)
+        assert cites[0] == 40
+        assert mcp_server.list_papers("123", sort="bogus")["error"]
+
     def test_scie_only_without_lists_errors(self, scopus_env):
         mcp_server._scopus_client = MagicMock()
         result = mcp_server.list_papers("123", scie_only=True)
