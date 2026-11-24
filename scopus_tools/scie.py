@@ -143,8 +143,16 @@ def resolve_index_paths(scie_list=None, scie_dir=None):
       2. scie_dir  … そのディレクトリ内の `*.csv` をすべて読む(index 専用フォルダ想定。
                       Docker では `/data/index` をマウントする運用)。
       3. 自動検出 … カレントの `*Citation Index*.csv` と `index/*.csv`。
+                      そこに無ければ `~/.scopus-tools/index/*.csv`。
+
+    3 の後段が要る理由: MCP クライアントはサーバを任意のカレントで起動するので、
+    カレント基準の自動検出は実質当たらない。`~/.scopus-tools/index` は CSV の
+    正規の置き場所なのに、登録時に `--scie-dir` を付け忘れると黙って未ロードになり、
+    `scie_only` がエラーになっていた。
     """
     import glob
+
+    from scopus_tools.cachedb import default_state_dir
 
     if scie_list:
         paths = list(scie_list)
@@ -153,6 +161,9 @@ def resolve_index_paths(scie_list=None, scie_dir=None):
     else:
         paths = (sorted(glob.glob("*Citation Index*.csv"))
                  + sorted(glob.glob(os.path.join("index", "*.csv"))))
+        if not paths:
+            paths = sorted(glob.glob(
+                os.path.join(default_state_dir(), "index", "*.csv")))
     return list(dict.fromkeys(paths))
 
 

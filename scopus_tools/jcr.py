@@ -196,8 +196,11 @@ def resolve_jcr_paths(jcr_list=None, jcr_dir=None):
 
       1. jcr_list … 明示されたパス
       2. jcr_dir  … そのディレクトリの `*.csv`
-      3. 自動検出 … カレントの `JCR_*.csv` と `jcr/*.csv`
+      3. 自動検出 … カレントの `JCR_*.csv` と `jcr/*.csv`。
+                      そこに無ければ `~/.scopus-tools/jcr/*.csv`
     """
+    from scopus_tools.cachedb import default_state_dir
+
     if jcr_list:
         paths = list(jcr_list)
     elif jcr_dir:
@@ -205,6 +208,9 @@ def resolve_jcr_paths(jcr_list=None, jcr_dir=None):
     else:
         paths = (sorted(glob.glob("JCR_*.csv"))
                  + sorted(glob.glob(os.path.join("jcr", "*.csv"))))
+        if not paths:
+            paths = sorted(glob.glob(
+                os.path.join(default_state_dir(), "jcr", "*.csv")))
     return list(dict.fromkeys(paths))
 
 

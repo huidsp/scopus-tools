@@ -88,8 +88,8 @@ CLI subcommands (see `scopus_tools/cli.py`):
   author-matching strategies to trust.
 - `mcp` — runs the MCP server over stdio (see `mcp_server`); takes `--projects-dir`,
   `--scie-list CSV [CSV ...]`, and `--scie-dir DIR` (loads every `*.csv` in DIR). With neither
-  scie flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir.
-  Forces logging to stderr before starting.
+  scie flag it auto-detects `*Citation Index*.csv` and `index/*.csv` in the launch dir,
+  then falls back to `~/.scopus-tools/index/*.csv`. Forces logging to stderr before starting.
 
 All subcommands also accept the global cache/network flags: `--refresh`, `--offline`,
 `--no-cache`, `--cache-db PATH`, `--timeout SEC`, `--stale-days N`, and the repeatable
@@ -288,8 +288,15 @@ Both are injected after the cache key is computed, so neither reaches the DB.
   - `annotate_papers(papers, issn_set)` — legacy single-set helper setting just `is_scie`.
   - `resolve_index_paths(scie_list, scie_dir)` / `discover_index_sets(...)` — shared
     startup loader (precedence: explicit list → all `*.csv` in dir → auto-detect
-    `*Citation Index*.csv` + `index/*.csv`). Called from `mcp_server.run`; the CLI passes
-    explicit paths via `load_index_sets`. Don't re-implement the glob logic elsewhere.
+    `*Citation Index*.csv` + `index/*.csv` in the launch dir → `~/.scopus-tools/index/*.csv`).
+    Called from `mcp_server.run`; the CLI passes explicit paths via `load_index_sets`.
+    Don't re-implement the glob logic elsewhere.
+    - **The home fallback exists because launch-dir detection never fires under MCP.**
+      Clients spawn the server with an arbitrary cwd, so a registration made without
+      `--scie-dir` silently loaded nothing even though the CSVs sat in the canonical
+      `~/.scopus-tools/index` — `scie_only` then errored and `wos_indexes` was absent.
+      It is a fallback only: the launch dir wins, and an explicit `--scie-dir` that is
+      empty stays empty. `jcr.resolve_jcr_paths` does the same with `~/.scopus-tools/jcr`.
   - Lists are登録制 (Clarivate Master Journal List), one CSV per index, not auto-downloadable;
     pass them via `--scie-list`. Each index is a separate download — a single CSV has no
     per-row index label. The data files are gitignored.

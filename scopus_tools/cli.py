@@ -338,7 +338,8 @@ def main():
                        help="Directory holding the Web of Science index CSVs; every '*.csv' in it "
                             "is loaded. Used by the Docker image (mount to /data/index). If neither "
                             "--scie-list nor --scie-dir is given, '*Citation Index*.csv' and "
-                            "'index/*.csv' in the launch directory are auto-loaded.")
+                            "'index/*.csv' in the launch directory are auto-loaded, then "
+                            "'~/.scopus-tools/index/*.csv'.")
 
     # 8. mcp-setup (MCP クライアントへの登録)
     setup_p = subparsers.add_parser(

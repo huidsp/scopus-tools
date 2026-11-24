@@ -1,4 +1,6 @@
 """scie モジュール(SCIE 収録判定)のユニットテスト。"""
+import os
+
 import pytest
 
 from scopus_tools import scie
@@ -105,3 +107,45 @@ class TestAnnotatePapersIndexes:
         scie.annotate_papers_indexes(papers, index_sets)
         assert papers[0]["wos_indexes"] == ["SCIE", "SSCI"]
         assert papers[0]["is_scie"] is True
+
+
+class TestHomeIndexFallback:
+    """カレントに CSV が無いとき `~/.scopus-tools/index` を拾う。
+
+    MCP クライアントは任意のカレントでサーバを起動するので、`--scie-dir` を
+    付け忘れた登録でも正規の置き場所は読めなければならない。
+    (conftest が HOME を tmp_path に向けている)
+    """
+
+    def _home_index(self, tmp_path):
+        d = tmp_path / ".scopus-tools" / "index"
+        d.mkdir(parents=True)
+        f = d / "Science Citation Index Expanded (SCIE).csv"
+        f.write_text("ISSN,eISSN\n1234-5678,\n", encoding="utf-8")
+        return f
+
+    def test_falls_back_to_home_index(self, tmp_path, monkeypatch):
+        from scopus_tools import scie
+        f = self._home_index(tmp_path)
+        cwd = tmp_path / "elsewhere"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        assert scie.resolve_index_paths() == [str(f)]
+        assert scie.discover_index_sets() == {"SCIE": {"12345678"}}
+
+    def test_launch_dir_wins_over_home(self, tmp_path, monkeypatch):
+        from scopus_tools import scie
+        self._home_index(tmp_path)
+        cwd = tmp_path / "elsewhere"
+        (cwd / "index").mkdir(parents=True)
+        (cwd / "index" / "x (SSCI).csv").write_text("ISSN\n8765-4321\n", encoding="utf-8")
+        monkeypatch.chdir(cwd)
+        assert scie.resolve_index_paths() == [os.path.join("index", "x (SSCI).csv")]
+
+    def test_explicit_dir_does_not_fall_back(self, tmp_path, monkeypatch):
+        from scopus_tools import scie
+        self._home_index(tmp_path)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        assert scie.resolve_index_paths(scie_dir=str(empty)) == []

@@ -436,7 +436,8 @@ def list_papers(author_ids, year_range=None, limit=DEFAULT_PAPER_LIMIT, scie_onl
         return _error("author_ids is empty")
     if scie_only and not _INDEX_SETS:
         return _error(
-            "scie_only requires WoS index CSVs; start the server with "
+            "scie_only requires WoS index CSVs; put them in "
+            "~/.scopus-tools/index or start the server with "
             "--scie-list or --scie-dir"
         )
 
